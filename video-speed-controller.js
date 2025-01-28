@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
+// @version      1.2.1
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站（可通过修改脚本的 @match 规则扩展支持的网站）。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites (extendable by modifying the @match rule).
 // @author       ternece
@@ -58,10 +58,16 @@
             const checkVideo = () => {
                 // 添加对 YouTube 播放器的特殊处理
                 if (location.hostname.includes('youtube.com')) {
-                    const youtubeVideo = document.querySelector('.html5-main-video');
+                    // 尝试多个可能的选择器
+                    const youtubeVideo = document.querySelector('.html5-main-video') || 
+                                      document.querySelector('video.video-stream') ||
+                                      document.querySelector('.html5-video-player video');
                     if (youtubeVideo && youtubeVideo.readyState >= 1) {
+                        console.log('找到YouTube视频元素:', youtubeVideo);
                         return youtubeVideo;
                     }
+                    console.log('YouTube视频元素未就绪');
+                    return null;
                 } else {
                     const video = document.querySelector("video");
                     if (video && video.readyState >= 1) {
@@ -181,19 +187,33 @@
 
             // 创建新的事件监听器
             keydownListener = (e) => {
-                // 增加更高的事件捕获优先级
+                // 只处理我们关心的按键
+                const validKeys = ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'Enter', 'Equal', 'Minus', 'BracketRight', 'BracketLeft', 'KeyP'];
+                if (!validKeys.includes(e.code)) {
+                    return;
+                }
+
+                // 检查是否在输入框或文本区域中
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+                    return;
+                }
+
+                // YouTube 特殊处理
                 if (location.hostname.includes('youtube.com')) {
-                    // 在YouTube上处理左方向键
-                    if (e.code === 'ArrowLeft') {
-                        e.stopPropagation();
-                        e.stopImmediatePropagation();
-                        e.preventDefault();
-                        video.currentTime -= 5;
+                    const videoPlayer = document.querySelector('.html5-video-player') || 
+                                      document.querySelector('#movie_player');
+                    if (!videoPlayer) {
+                        console.log('未找到YouTube播放器元素');
                         return;
                     }
-                    e.stopPropagation();
-                    e.stopImmediatePropagation();
-                    e.preventDefault();
+
+                    // 检查事件是否发生在视频播放器区域内
+                    const isInVideoPlayer = videoPlayer.contains(e.target) || e.target === videoPlayer;
+                    
+                    // 如果不在视频播放器区域内，不处理事件
+                    if (!isInVideoPlayer) {
+                        return;
+                    }
                 }
 
                 // 音量控制：上下方向键
