@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         视频倍速播放增强版1
+// @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
 // @version      1.2.0
