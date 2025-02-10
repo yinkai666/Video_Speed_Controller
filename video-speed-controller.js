@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.2.1
+// @version      1.2.3
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站（可通过修改脚本的 @match 规则扩展支持的网站）。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites (extendable by modifying the @match rule).
 // @author       ternece
@@ -10,11 +10,61 @@
 // @match        *://*.youtube.com/watch*
 // @match        *://*.bilibili.com/video/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=greasyfork.org
-// @grant        none
+// @grant        GM_registerMenuCommand
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @downloadURL https://update.greasyfork.org/scripts/525065/%E8%A7%86%E9%A2%91%E5%80%8D%E9%80%9F%E6%92%AD%E6%94%BE%E5%A2%9E%E5%BC%BA%E7%89%88.user.js
+// @updateURL https://update.greasyfork.org/scripts/525065/%E8%A7%86%E9%A2%91%E5%80%8D%E9%80%9F%E6%92%AD%E6%94%BE%E5%A2%9E%E5%BC%BA%E7%89%88.meta.js
 // ==/UserScript==
 
 (function () {
     "use strict";
+
+    // 默认设置
+    const DEFAULT_SETTINGS = {
+        defaultRate: 1.0,    // 默认播放速度
+        targetRate: 2.5      // 长按右键时的倍速
+    };
+
+    // 获取保存的设置或使用默认值
+    let settings = {
+        defaultRate: GM_getValue('defaultRate', DEFAULT_SETTINGS.defaultRate),
+        targetRate: GM_getValue('targetRate', DEFAULT_SETTINGS.targetRate)
+    };
+
+    // 注册菜单命令
+    GM_registerMenuCommand('设置默认播放速度', () => {
+        const newRate = prompt('请输入默认播放速度 (0.5-16)，视频加载时将使用此速度:', settings.defaultRate);
+        if (newRate !== null) {
+            const rate = parseFloat(newRate);
+            if (!isNaN(rate) && rate >= 0.5 && rate <= 16) {
+                settings.defaultRate = rate;
+                GM_setValue('defaultRate', rate);
+                showFloatingMessage(`默认播放速度已设置为 ${rate}x`);
+                // 立即应用新的默认速度
+                const video = document.querySelector('video');
+                if (video) {
+                    video.playbackRate = rate;
+                }
+            } else {
+                alert('请输入有效的速度值（0.5-16）');
+            }
+        }
+    });
+
+    GM_registerMenuCommand('设置长按右键倍速', () => {
+        const newRate = prompt('请输入长按右键时的倍速 (0.5-16):', settings.targetRate);
+        if (newRate !== null) {
+            const rate = parseFloat(newRate);
+            if (!isNaN(rate) && rate >= 0.5 && rate <= 16) {
+                settings.targetRate = rate;
+                GM_setValue('targetRate', rate);
+                showFloatingMessage(`长按右键倍速已设置为 ${rate}x`);
+            } else {
+                alert('请输入有效的速度值（0.5-16）');
+            }
+        }
+    });
 
     let currentUrl = location.href;
     let videoObserver = null;
@@ -64,6 +114,8 @@
                                       document.querySelector('.html5-video-player video');
                     if (youtubeVideo && youtubeVideo.readyState >= 1) {
                         console.log('找到YouTube视频元素:', youtubeVideo);
+                        // 设置默认播放速度
+                        youtubeVideo.playbackRate = settings.defaultRate;
                         return youtubeVideo;
                     }
                     console.log('YouTube视频元素未就绪');
@@ -71,6 +123,8 @@
                 } else {
                     const video = document.querySelector("video");
                     if (video && video.readyState >= 1) {
+                        // 设置默认播放速度
+                        video.playbackRate = settings.defaultRate;
                         return video;
                     }
                 }
@@ -158,7 +212,7 @@
             const quickIncreaseKey = "BracketRight"; // 】键
             const quickDecreaseKey = "BracketLeft"; // 【键
             const resetSpeedKey = "KeyP"; // P键
-            let targetRate = 2.5; // 目标倍速
+            let targetRate = settings.targetRate; // 目标倍速
             let currentQuickRate = 1.0; // 当前快速倍速
             let downCount = 0; // 按键按下计数器
             let originalRate = video.playbackRate; // 保存原始播放速度
