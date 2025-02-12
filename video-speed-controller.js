@@ -7,7 +7,7 @@
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites (extendable by modifying the @match rule).
 // @author       ternece
 // @license      MIT
-// @match        *://*.youtube.com/watch*
+// @match        *://*.youtube.com/*
 // @match        *://*.bilibili.com/video/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=greasyfork.org
 // @grant        GM_registerMenuCommand
