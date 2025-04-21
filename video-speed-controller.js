@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.2.4
+// @version      1.2.5
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站（可通过修改脚本的 @match 规则扩展支持的网站）。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites (extendable by modifying the @match rule).
 // @author       ternece
@@ -23,21 +23,25 @@
     // 默认设置
     const DEFAULT_SETTINGS = {
         defaultRate: 1.0,    // 默认播放速度
-        targetRate: 2.5      // 长按右键时的倍速
+        targetRate: 2.5,     // 长按右键时的倍速
+        quickRateStep: 0.5,  // 按[]键调整速度的步长
+        targetRateStep: 0.5  // 按 +/- 键调整目标倍速的步长
     };
 
     // 获取保存的设置或使用默认值
     let settings = {
         defaultRate: GM_getValue('defaultRate', DEFAULT_SETTINGS.defaultRate),
-        targetRate: GM_getValue('targetRate', DEFAULT_SETTINGS.targetRate)
+        targetRate: GM_getValue('targetRate', DEFAULT_SETTINGS.targetRate),
+        quickRateStep: GM_getValue('quickRateStep', DEFAULT_SETTINGS.quickRateStep),
+        targetRateStep: GM_getValue('targetRateStep', DEFAULT_SETTINGS.targetRateStep)
     };
 
     // 注册菜单命令
     GM_registerMenuCommand('设置默认播放速度', () => {
-        const newRate = prompt('请输入默认播放速度 (0.5-16)，视频加载时将使用此速度:', settings.defaultRate);
+        const newRate = prompt('请输入默认播放速度 (0.1-16)，视频加载时将使用此速度:', settings.defaultRate);
         if (newRate !== null) {
             const rate = parseFloat(newRate);
-            if (!isNaN(rate) && rate >= 0.5 && rate <= 16) {
+            if (!isNaN(rate) && rate >= 0.1 && rate <= 16) {
                 settings.defaultRate = rate;
                 GM_setValue('defaultRate', rate);
                 showFloatingMessage(`默认播放速度已设置为 ${rate}x`);
@@ -47,21 +51,49 @@
                     video.playbackRate = rate;
                 }
             } else {
-                alert('请输入有效的速度值（0.5-16）');
+                alert('请输入有效的速度值（0.1-16）');
             }
         }
     });
 
     GM_registerMenuCommand('设置长按右键倍速', () => {
-        const newRate = prompt('请输入长按右键时的倍速 (0.5-16):', settings.targetRate);
+        const newRate = prompt('请输入长按右键时的倍速 (0.1-16):', settings.targetRate);
         if (newRate !== null) {
             const rate = parseFloat(newRate);
-            if (!isNaN(rate) && rate >= 0.5 && rate <= 16) {
+            if (!isNaN(rate) && rate >= 0.1 && rate <= 16) {
                 settings.targetRate = rate;
                 GM_setValue('targetRate', rate);
                 showFloatingMessage(`长按右键倍速已设置为 ${rate}x`);
             } else {
-                alert('请输入有效的速度值（0.5-16）');
+                alert('请输入有效的速度值（0.1-16）');
+            }
+        }
+    });
+
+    GM_registerMenuCommand('设置快速调速步长', () => {
+        const newStep = prompt('请输入按 [ 或 ] 键调整速度的步长 (0.1-3):', settings.quickRateStep);
+        if (newStep !== null) {
+            const step = parseFloat(newStep);
+            if (!isNaN(step) && step >= 0.1 && step <= 3) {
+                settings.quickRateStep = step;
+                GM_setValue('quickRateStep', step);
+                showFloatingMessage(`快速调速步长已设置为 ${step}`);
+            } else {
+                alert('请输入有效的步长值（0.1-3）');
+            }
+        }
+    });
+
+    GM_registerMenuCommand('设置目标倍速调整步长', () => {
+        const newStep = prompt('请输入按 +/- 键调整目标倍速的步长 (0.1-16):', settings.targetRateStep);
+        if (newStep !== null) {
+            const step = parseFloat(newStep);
+            if (!isNaN(step) && step >= 0.1 && step <= 16) {
+                settings.targetRateStep = step;
+                GM_setValue('targetRateStep', step);
+                showFloatingMessage(`目标倍速调整步长已设置为 ${step}`);
+            } else {
+                alert('请输入有效的步长值（0.1-16）');
             }
         }
     });
@@ -242,7 +274,7 @@
             // 创建新的事件监听器
             keydownListener = (e) => {
                 // 只处理我们关心的按键
-                const validKeys = ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'Enter', 'Equal', 'Minus', 'BracketRight', 'BracketLeft', 'KeyP'];
+                const validKeys = ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'Enter', 'Equal', 'Minus', 'BracketRight', 'BracketLeft', 'KeyP', 'Comma', 'Period'];
                 if (!validKeys.includes(e.code)) {
                     return;
                 }
@@ -332,23 +364,24 @@
                 if (e.code === quickIncreaseKey) {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    if (currentQuickRate === 1.0) {
-                        currentQuickRate = 1.5;
-                    } else {
-                        currentQuickRate += 0.5;
-                    }
+                    // 增加速度，最高 16
+                    currentQuickRate = Math.min(16, currentQuickRate + settings.quickRateStep);
                     video.playbackRate = currentQuickRate;
-                    showFloatingMessage(`当前播放速度：${currentQuickRate}x`);
+                    showFloatingMessage(`当前播放速度：${currentQuickRate.toFixed(2)}x`); // 使用 toFixed 避免过多小数
                 }
 
                 // 按【键减少当前播放倍速
                 if (e.code === quickDecreaseKey) {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    if (currentQuickRate > 0.5) {
-                        currentQuickRate -= 0.5;
+                    // 减少速度，最低 0.1
+                    const nextRate = currentQuickRate - settings.quickRateStep;
+                    if (nextRate >= 0.1) {
+                        currentQuickRate = nextRate;
                         video.playbackRate = currentQuickRate;
-                        showFloatingMessage(`当前播放速度：${currentQuickRate}x`);
+                        showFloatingMessage(`当前播放速度：${currentQuickRate.toFixed(2)}x`); // 使用 toFixed
+                    } else {
+                        showFloatingMessage("播放速度已达到最低值 0.1x");
                     }
                 }
 
@@ -365,20 +398,38 @@
                 if (e.code === increaseKey) {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    targetRate += 0.5;
-                    showFloatingMessage(`下次倍速：${targetRate}`);
+                    // 增加下次长按倍速，最高 16
+                    targetRate = Math.min(16, targetRate + settings.targetRateStep);
+                    showFloatingMessage(`下次倍速：${targetRate.toFixed(2)}`);
                 }
 
                 // 按 - 键：减少 targetRate 的值
                 if (e.code === decreaseKey) {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    if (targetRate > 0.5) {
-                        targetRate -= 0.5;
-                        showFloatingMessage(`下次倍速：${targetRate}`);
+                    // 减少下次长按倍速，最低 0.1
+                    const nextTargetRate = targetRate - settings.targetRateStep;
+                    if (nextTargetRate >= 0.1) {
+                        targetRate = nextTargetRate;
+                        showFloatingMessage(`下次倍速：${targetRate.toFixed(2)}`);
                     } else {
-                        showFloatingMessage("倍速已达到最小值 0.5");
+                        showFloatingMessage("下次倍速已达到最小值 0.1");
                     }
+                }
+
+                // 逐帧播放：仅在视频暂停时生效
+                if (video.paused && (e.code === 'Comma' || e.code === 'Period')) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    const frameStep = 1 / 30; // 假设 30 FPS
+                    if (e.code === 'Period') {
+                        video.currentTime = Math.min(video.duration, video.currentTime + frameStep);
+                        // showFloatingMessage('下一帧'); // 频繁操作，提示可能过多，暂时注释掉
+                    } else if (e.code === 'Comma') {
+                        video.currentTime = Math.max(0, video.currentTime - frameStep);
+                        // showFloatingMessage('上一帧'); // 频繁操作，提示可能过多，暂时注释掉
+                    }
+                    return; // 处理完逐帧后直接返回
                 }
             };
 
