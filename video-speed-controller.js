@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.2.5
+// @version      1.2.6
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站（可通过修改脚本的 @match 规则扩展支持的网站）。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites (extendable by modifying the @match rule).
 // @author       ternece
@@ -279,9 +279,32 @@
                     return;
                 }
 
-                // 检查是否在输入框或文本区域中
-                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
-                    return;
+                // 检查事件是否起源于输入框、文本区域或特定元素（包括 Shadow DOM）
+                const path = e.composedPath();
+                const isInputFocused = path.some(element => {
+                    if (!element.tagName) return false;
+                    const tagName = element.tagName.toLowerCase();
+                    // 检查常规输入元素
+                    if (tagName === 'input' || tagName === 'textarea' || element.isContentEditable) {
+                        return true;
+                    }
+                    // 检查 Bilibili 评论区 (Shadow DOM)
+                    if (tagName === 'bili-comment-rich-textarea') {
+                        return true;
+                    }
+                    // 检查是否在 Bilibili 评论区的 Shadow Root 内部
+                    if (element.shadowRoot && element.shadowRoot.contains(path[0])) {
+                        // 进一步检查 Shadow Root 内的元素，例如 contenteditable div
+                        const innerEditable = element.shadowRoot.querySelector('[contenteditable="true"]');
+                        if (innerEditable && path.includes(innerEditable)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                });
+
+                if (isInputFocused) {
+                    return; // 如果焦点在输入区域，则不执行快捷键
                 }
 
                 // YouTube 特殊处理
