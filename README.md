@@ -1,6 +1,6 @@
 # 视频倍速播放增强版 (Enhanced Video Speed Controller)
 
-一个强大而简单的视频倍速控制脚本，支持大多数网页视频播放器（可通过修改脚本的 @match 规则扩展支持的网站），特别优化了YouTube和Bilibili等主流视频网站。
+一个强大而简单的视频倍速控制脚本，支持大多数网页视频播放器（可通过修改脚本的 @match 规则扩展支持的网站），特别优化了YouTube和Bilibili等主流视频网站。 修改自苗言的脚本https://greasyfork.org/zh-CN/scripts/523429-%E8%A7%86%E9%A2%91%E5%80%8D%E9%80%9F%E6%92%AD%E6%94%BE
 
 ## 主要功能
 
