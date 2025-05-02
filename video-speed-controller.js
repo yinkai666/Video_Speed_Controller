@@ -348,6 +348,43 @@
                 if (e.code === 'Enter') {
                     e.preventDefault();
                     e.stopImmediatePropagation();
+                    
+                    // 针对B站的特殊处理
+                    if (location.hostname.includes('bilibili.com')) {
+                        // 使用准确的选择器查找B站的全屏按钮
+                        const fullscreenBtn = document.querySelector('.bpx-player-ctrl-full') || 
+                                             document.querySelector('[aria-label="全屏"]') ||
+                                             document.querySelector('.bilibili-player-video-btn-fullscreen') ||
+                                             document.querySelector('.ytp-fullscreen-button');
+                        
+                        if (fullscreenBtn) {
+                            // 模拟点击全屏按钮
+                            fullscreenBtn.click();
+                            return; // 成功处理，直接返回
+                        } else {
+                            console.log('未找到B站全屏按钮，使用默认全屏API');
+                            // 如果找不到按钮，继续使用默认API
+                        }
+                    }
+                    // 针对YouTube的特殊处理
+                    else if (location.hostname.includes('youtube.com')) {
+                        // 使用准确的选择器查找YouTube的全屏按钮
+                        const ytFullscreenBtn = document.querySelector('.ytp-fullscreen-button') || 
+                                              document.querySelector('[data-title-no-tooltip="全屏"]') ||
+                                              document.querySelector('[aria-keyshortcuts="f"]') ||
+                                              document.querySelector('[data-title-no-tooltip="全屏 (f)"]');
+                        
+                        if (ytFullscreenBtn) {
+                            // 模拟点击全屏按钮
+                            ytFullscreenBtn.click();
+                            return; // 成功处理，直接返回
+                        } else {
+                            console.log('未找到YouTube全屏按钮，使用默认全屏API');
+                            // 如果找不到按钮，继续使用默认API
+                        }
+                    }
+                    
+                    // 默认全屏API（用于其他网站或找不到特定网站按钮时）
                     if (!document.fullscreenElement) {
                         if (video.requestFullscreen) {
                             video.requestFullscreen();
