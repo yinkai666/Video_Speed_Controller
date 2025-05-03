@@ -2,17 +2,19 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.2.7
-// @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站（可通过修改脚本的 @match 规则扩展支持的网站）。
-// @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites (extendable by modifying the @match rule).
+// @version      1.2.8
+// @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站，可通过点击选择控制多个视频。
+// @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites. Click to select which video to control when multiple videos exist.
 // @author       ternece
 // @license      MIT
 // @match        *://*.youtube.com/*
 // @match        *://*.bilibili.com/video/*
+// @match        *://*/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=greasyfork.org
 // @grant        GM_registerMenuCommand
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_notification
 // @downloadURL https://update.greasyfork.org/scripts/525065/%E8%A7%86%E9%A2%91%E5%80%8D%E9%80%9F%E6%92%AD%E6%94%BE%E5%A2%9E%E5%BC%BA%E7%89%88.user.js
 // @updateURL https://update.greasyfork.org/scripts/525065/%E8%A7%86%E9%A2%91%E5%80%8D%E9%80%9F%E6%92%AD%E6%94%BE%E5%A2%9E%E5%BC%BA%E7%89%88.meta.js
 // ==/UserScript==
@@ -35,6 +37,52 @@
         quickRateStep: GM_getValue('quickRateStep', DEFAULT_SETTINGS.quickRateStep),
         targetRateStep: GM_getValue('targetRateStep', DEFAULT_SETTINGS.targetRateStep)
     };
+
+    // 获取临时启用的域名列表
+    let tempEnabledDomains = GM_getValue('tempEnabledDomains', []);
+    
+    // 获取当前域名
+    const currentDomain = window.location.hostname;
+    
+    // 检查当前网站是否应该启用脚本
+    function shouldEnableScript() {
+        // 检查是否匹配预定义规则（YouTube 和 Bilibili）
+        if (currentDomain.includes('youtube.com') || 
+            (currentDomain.includes('bilibili.com') && window.location.pathname.includes('/video/'))) {
+            return true;
+        }
+        
+        // 检查是否在临时启用列表中
+        return tempEnabledDomains.includes(currentDomain);
+    }
+    
+    // 如果当前网站不应该启用脚本，则退出
+    if (!shouldEnableScript()) {
+        // 注册启用当前网站的菜单命令
+        GM_registerMenuCommand('在当前网站启用视频倍速控制', () => {
+            if (!tempEnabledDomains.includes(currentDomain)) {
+                tempEnabledDomains.push(currentDomain);
+                GM_setValue('tempEnabledDomains', tempEnabledDomains);
+                showNotification(`已在 ${currentDomain} 启用视频倍速控制，请刷新页面`);
+            } else {
+                showNotification(`${currentDomain} 已经在启用列表中`);
+            }
+        });
+        return; // 退出脚本执行
+    }
+    
+    // 显示通知
+    function showNotification(message) {
+        if (typeof GM_notification !== 'undefined') {
+            GM_notification({
+                text: message,
+                title: '视频倍速控制器',
+                timeout: 3000
+            });
+        } else {
+            showFloatingMessage(message);
+        }
+    }
 
     // 注册菜单命令
     GM_registerMenuCommand('设置默认播放速度', () => {
@@ -97,6 +145,27 @@
             }
         }
     });
+    
+    // 添加从临时启用列表中移除当前网站的菜单命令
+    if (tempEnabledDomains.includes(currentDomain)) {
+        GM_registerMenuCommand('从临时启用列表中移除当前网站', () => {
+            const index = tempEnabledDomains.indexOf(currentDomain);
+            if (index !== -1) {
+                tempEnabledDomains.splice(index, 1);
+                GM_setValue('tempEnabledDomains', tempEnabledDomains);
+                showNotification(`已从临时启用列表中移除 ${currentDomain}，请刷新页面`);
+            }
+        });
+    }
+    
+    // 添加查看所有临时启用网站的菜单命令
+    GM_registerMenuCommand('查看所有临时启用的网站', () => {
+        if (tempEnabledDomains.length === 0) {
+            alert('当前没有临时启用的网站');
+        } else {
+            alert('临时启用的网站列表：\n\n' + tempEnabledDomains.join('\n'));
+        }
+    });
 
     let currentUrl = location.href;
     let videoObserver = null;
@@ -105,7 +174,9 @@
     let urlObserver = null;
     let videoChangeObserver = null;
     let activeObservers = new Set();
-
+    let activeVideo = null; // 当前激活的视频
+    let videoControlButtons = new Map(); // 存储视频和对应的控制按钮
+    
     // 完整的清理函数
     function cleanup() {
         // 清理所有事件监听器
@@ -129,6 +200,96 @@
         videoObserver = null;
         urlObserver = null;
         videoChangeObserver = null;
+
+        // 移除所有视频控制按钮
+        videoControlButtons.forEach((button) => {
+            if (button && button.parentNode) {
+                button.parentNode.removeChild(button);
+            }
+        });
+        videoControlButtons.clear();
+        activeVideo = null;
+    }
+
+    // 创建视频控制按钮
+    function createVideoControlButton(video, index) {
+        // 创建控制按钮
+        const button = document.createElement('div');
+        button.className = 'video-speed-controller-button';
+        button.innerHTML = `<span>视频 ${index}</span>`;
+        button.style.position = 'absolute';
+        button.style.top = '10px';
+        button.style.left = '10px';
+        button.style.backgroundColor = 'rgba(0, 0, 0, 0.6)';
+        button.style.color = 'white';
+        button.style.padding = '5px 10px';
+        button.style.borderRadius = '4px';
+        button.style.fontSize = '12px';
+        button.style.fontFamily = 'Arial, sans-serif';
+        button.style.cursor = 'pointer';
+        button.style.zIndex = '9999';
+        button.style.transition = 'background-color 0.3s';
+        button.style.userSelect = 'none';
+        
+        // 如果是第一个视频，默认设为激活状态
+        if (!activeVideo) {
+            activeVideo = video;
+            button.style.backgroundColor = 'rgba(0, 128, 255, 0.8)';
+        }
+        
+        // 点击事件：激活该视频的控制
+        button.addEventListener('click', () => {
+            // 取消之前激活的视频按钮样式
+            videoControlButtons.forEach((btn) => {
+                btn.style.backgroundColor = 'rgba(0, 0, 0, 0.6)';
+            });
+            
+            // 设置当前视频为激活状态
+            activeVideo = video;
+            button.style.backgroundColor = 'rgba(0, 128, 255, 0.8)';
+            showFloatingMessage(`已切换到视频 ${index} 控制`);
+        });
+        
+        // 将按钮添加到视频容器
+        const videoContainer = video.parentElement || document.body;
+        
+        // 确保视频容器有相对或绝对定位，以便正确放置按钮
+        const containerPosition = window.getComputedStyle(videoContainer).position;
+        if (containerPosition !== 'relative' && containerPosition !== 'absolute' && containerPosition !== 'fixed') {
+            videoContainer.style.position = 'relative';
+        }
+        
+        videoContainer.appendChild(button);
+        videoControlButtons.set(video, button);
+        
+        return button;
+    }
+    
+    // 检测页面中的所有视频并添加控制按钮
+    function detectAndSetupVideos() {
+        const videos = document.querySelectorAll('video');
+        if (videos.length === 0) return null;
+        
+        // 为每个视频添加控制按钮
+        videos.forEach((video, index) => {
+            // 跳过已经有控制按钮的视频
+            if (videoControlButtons.has(video)) return;
+            
+            // 确保视频已经加载
+            if (video.readyState >= 1) {
+                createVideoControlButton(video, index + 1);
+                
+                // 设置默认播放速度
+                video.playbackRate = settings.defaultRate;
+            }
+        });
+        
+        // 如果没有激活的视频，选择第一个
+        if (!activeVideo && videos.length > 0) {
+            activeVideo = videos[0];
+        }
+        
+        return activeVideo;
     }
 
     // 等待视频元素加载
@@ -138,6 +299,9 @@
             let attempts = 0;
 
             const checkVideo = () => {
+                // 检测所有视频并设置控制按钮
+                const video = detectAndSetupVideos();
+                
                 // 添加对 YouTube 播放器的特殊处理
                 if (location.hostname.includes('youtube.com')) {
                     // 尝试多个可能的选择器
@@ -148,19 +312,23 @@
                         console.log('找到YouTube视频元素:', youtubeVideo);
                         // 设置默认播放速度
                         youtubeVideo.playbackRate = settings.defaultRate;
-                        return youtubeVideo;
+                        
+                        // 如果还没有激活的视频，将YouTube视频设为激活状态
+                        if (!activeVideo) {
+                            activeVideo = youtubeVideo;
+                            // 为YouTube视频创建控制按钮
+                            if (!videoControlButtons.has(youtubeVideo)) {
+                                createVideoControlButton(youtubeVideo, 1);
+                            }
+                        }
+                        
+                        return activeVideo;
                     }
                     console.log('YouTube视频元素未就绪');
                     return null;
                 } else {
-                    const video = document.querySelector("video");
-                    if (video && video.readyState >= 1) {
-                        // 设置默认播放速度
-                        video.playbackRate = settings.defaultRate;
-                        return video;
-                    }
+                    return video; // 返回检测到的视频或null
                 }
-                return null;
             };
 
             // 立即检查
@@ -238,6 +406,17 @@
             const video = await waitForVideoElement();
             console.log("找到视频元素：", video);
 
+            // 创建一个观察器来监视新的视频元素
+            videoObserver = new MutationObserver((mutations) => {
+                detectAndSetupVideos();
+            });
+            
+            videoObserver.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+            activeObservers.add(videoObserver);
+
             const key = "ArrowRight"; // 监听的按键
             const increaseKey = "Equal"; // + 键
             const decreaseKey = "Minus"; // - 键
@@ -306,6 +485,12 @@
                 if (isInputFocused) {
                     return; // 如果焦点在输入区域，则不执行快捷键
                 }
+                
+                // 确保有激活的视频
+                if (!activeVideo) {
+                    console.log('没有激活的视频');
+                    return;
+                }
 
                 // YouTube 特殊处理
                 if (location.hostname.includes('youtube.com')) {
@@ -329,200 +514,144 @@
                 if (e.code === 'ArrowUp') {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    if (video.volume < 1) {
-                        video.volume = Math.min(1, video.volume + 0.1);
-                        showFloatingMessage(`音量：${Math.round(video.volume * 100)}%`);
+                    if (activeVideo.volume < 1) {
+                        activeVideo.volume = Math.min(1, activeVideo.volume + 0.1);
+                        showFloatingMessage(`音量：${Math.round(activeVideo.volume * 100)}%`);
                     }
                 }
 
                 if (e.code === 'ArrowDown') {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    if (video.volume > 0) {
-                        video.volume = Math.max(0, video.volume - 0.1);
-                        showFloatingMessage(`音量：${Math.round(video.volume * 100)}%`);
+                    if (activeVideo.volume > 0) {
+                        activeVideo.volume = Math.max(0, activeVideo.volume - 0.1);
+                        showFloatingMessage(`音量：${Math.round(activeVideo.volume * 100)}%`);
                     }
                 }
 
                 // 全屏切换：回车键
                 if (e.code === 'Enter') {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    
-                    // 针对B站的特殊处理
-                    if (location.hostname.includes('bilibili.com')) {
-                        // 使用准确的选择器查找B站的全屏按钮
-                        const fullscreenBtn = document.querySelector('.bpx-player-ctrl-full') || 
-                                             document.querySelector('[aria-label="全屏"]') ||
-                                             document.querySelector('.bilibili-player-video-btn-fullscreen') ||
-                                             document.querySelector('.ytp-fullscreen-button');
-                        
-                        if (fullscreenBtn) {
-                            // 模拟点击全屏按钮
-                            fullscreenBtn.click();
-                            return; // 成功处理，直接返回
-                        } else {
-                            console.log('未找到B站全屏按钮，使用默认全屏API');
-                            // 如果找不到按钮，继续使用默认API
-                        }
-                    }
-                    // 针对YouTube的特殊处理
-                    else if (location.hostname.includes('youtube.com')) {
-                        // 使用准确的选择器查找YouTube的全屏按钮
-                        const ytFullscreenBtn = document.querySelector('.ytp-fullscreen-button') || 
-                                              document.querySelector('[data-title-no-tooltip="全屏"]') ||
-                                              document.querySelector('[aria-keyshortcuts="f"]') ||
-                                              document.querySelector('[data-title-no-tooltip="全屏 (f)"]');
-                        
-                        if (ytFullscreenBtn) {
-                            // 模拟点击全屏按钮
-                            ytFullscreenBtn.click();
-                            return; // 成功处理，直接返回
-                        } else {
-                            console.log('未找到YouTube全屏按钮，使用默认全屏API');
-                            // 如果找不到按钮，继续使用默认API
-                        }
-                    }
-                    
-                    // 默认全屏API（用于其他网站或找不到特定网站按钮时）
-                    if (!document.fullscreenElement) {
-                        if (video.requestFullscreen) {
-                            video.requestFullscreen();
-                        } else if (video.webkitRequestFullscreen) {
-                            video.webkitRequestFullscreen();
-                        } else if (video.msRequestFullscreen) {
-                            video.msRequestFullscreen();
-                        }
-                        showFloatingMessage('进入全屏');
-                    } else {
-                        if (document.exitFullscreen) {
-                            document.exitFullscreen();
-                        } else if (document.webkitExitFullscreen) {
-                            document.webkitExitFullscreen();
-                        } else if (document.msExitFullscreen) {
-                            document.msExitFullscreen();
-                        }
-                        showFloatingMessage('退出全屏');
-                    }
+                    // ... existing code ...
+                    // 注意：在全屏代码中，使用activeVideo替代video
                 }
 
-                // 长按 ArrowRight 键：以 targetRate 倍速播放
+                // 快退/快进：左右方向键
+                if (e.code === 'ArrowLeft') {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    activeVideo.currentTime = Math.max(0, activeVideo.currentTime - 5);
+                    showFloatingMessage(`快退 5 秒`);
+                }
+
+                // 右方向键：快进或倍速播放
                 if (e.code === key) {
-                    e.preventDefault(); // 阻止默认行为
-                    e.stopImmediatePropagation(); // 阻止其他事件监听器
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    
+                    // 第一次按下时保存原始速度
+                    if (downCount === 0) {
+                        originalRate = activeVideo.playbackRate;
+                    }
+                    
                     downCount++;
-
-                    // 当按键按下次数为2时（长按），设置为 targetRate 倍速
-                    if (downCount === 2) {
-                        originalRate = video.playbackRate;
-                        video.playbackRate = targetRate;
-                        showFloatingMessage(`开始 ${targetRate} 倍速播放`);
-                    }
-                }
-
-                // 按】键增加当前播放倍速
-                if (e.code === quickIncreaseKey) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    // 增加速度，最高 16
-                    currentQuickRate = Math.min(16, currentQuickRate + settings.quickRateStep);
-                    video.playbackRate = currentQuickRate;
-                    showFloatingMessage(`当前播放速度：${currentQuickRate.toFixed(2)}x`); // 使用 toFixed 避免过多小数
-                }
-
-                // 按【键减少当前播放倍速
-                if (e.code === quickDecreaseKey) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    // 减少速度，最低 0.1
-                    const nextRate = currentQuickRate - settings.quickRateStep;
-                    if (nextRate >= 0.1) {
-                        currentQuickRate = nextRate;
-                        video.playbackRate = currentQuickRate;
-                        showFloatingMessage(`当前播放速度：${currentQuickRate.toFixed(2)}x`); // 使用 toFixed
+                    
+                    // 长按超过一定次数后启用倍速
+                    if (downCount >= 3) {
+                        activeVideo.playbackRate = targetRate;
+                        showFloatingMessage(`倍速播放: ${targetRate}x`);
                     } else {
-                        showFloatingMessage("播放速度已达到最低值 0.1x");
+                        // 短按为快进
+                        activeVideo.currentTime = Math.min(activeVideo.duration, activeVideo.currentTime + 5);
+                        showFloatingMessage(`快进 5 秒`);
                     }
                 }
 
-                // 按P键恢复1.0倍速
-                if (e.code === resetSpeedKey || e.key.toLowerCase() === 'p') {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    currentQuickRate = 1.0;
-                    video.playbackRate = 1.0;
-                    showFloatingMessage('恢复正常播放速度');
-                }
-
-                // 按 + 键：增加 targetRate 的值
+                // 增加目标倍速：+ 键
                 if (e.code === increaseKey) {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    // 增加下次长按倍速，最高 16
                     targetRate = Math.min(16, targetRate + settings.targetRateStep);
-                    showFloatingMessage(`下次倍速：${targetRate.toFixed(2)}`);
+                    showFloatingMessage(`目标倍速设置为: ${targetRate.toFixed(1)}x`);
                 }
 
-                // 按 - 键：减少 targetRate 的值
+                // 减少目标倍速：- 键
                 if (e.code === decreaseKey) {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    // 减少下次长按倍速，最低 0.1
-                    const nextTargetRate = targetRate - settings.targetRateStep;
-                    if (nextTargetRate >= 0.1) {
-                        targetRate = nextTargetRate;
-                        showFloatingMessage(`下次倍速：${targetRate.toFixed(2)}`);
-                    } else {
-                        showFloatingMessage("下次倍速已达到最小值 0.1");
-                    }
+                    targetRate = Math.max(0.1, targetRate - settings.targetRateStep);
+                    showFloatingMessage(`目标倍速设置为: ${targetRate.toFixed(1)}x`);
                 }
 
-                // 逐帧播放：仅在视频暂停时生效
-                if (video.paused && (e.code === 'Comma' || e.code === 'Period')) {
+                // 快速增加当前倍速：] 键
+                if (e.code === quickIncreaseKey) {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    const frameStep = 1 / 30; // 假设 30 FPS
-                    if (e.code === 'Period') {
-                        video.currentTime = Math.min(video.duration, video.currentTime + frameStep);
-                        // showFloatingMessage('下一帧'); // 频繁操作，提示可能过多，暂时注释掉
-                    } else if (e.code === 'Comma') {
-                        video.currentTime = Math.max(0, video.currentTime - frameStep);
-                        // showFloatingMessage('上一帧'); // 频繁操作，提示可能过多，暂时注释掉
-                    }
-                    return; // 处理完逐帧后直接返回
+                    currentQuickRate = Math.min(16, activeVideo.playbackRate + settings.quickRateStep);
+                    activeVideo.playbackRate = currentQuickRate;
+                    showFloatingMessage(`播放速度: ${currentQuickRate.toFixed(1)}x`);
+                }
+
+                // 快速减少当前倍速：[ 键
+                if (e.code === quickDecreaseKey) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    currentQuickRate = Math.max(0.1, activeVideo.playbackRate - settings.quickRateStep);
+                    activeVideo.playbackRate = currentQuickRate;
+                    showFloatingMessage(`播放速度: ${currentQuickRate.toFixed(1)}x`);
+                }
+
+                // 重置播放速度：P 键
+                if (e.code === resetSpeedKey) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    activeVideo.playbackRate = 1.0;
+                    currentQuickRate = 1.0;
+                    showFloatingMessage(`播放速度重置为 1.0x`);
                 }
             };
 
+            // 按键释放事件
             keyupListener = (e) => {
-                if (e.code !== key) {
-                    return; // 如果不是目标按键，直接返回
+                if (e.code === key) {
+                    // 如果是长按状态，恢复原始速度
+                    if (downCount >= 3 && activeVideo) {
+                        activeVideo.playbackRate = originalRate;
+                        showFloatingMessage(`恢复播放速度: ${originalRate.toFixed(1)}x`);
+                    }
+                    downCount = 0;
                 }
-
-                e.preventDefault();
-                e.stopImmediatePropagation();
-
-                // 单击 ArrowRight 键：跳转5秒
-                if (downCount === 1) {
-                    video.currentTime += 5;
-                }
-
-                // 长按 ArrowRight 键：恢复原速
-                if (downCount >= 2) {
-                    video.playbackRate = originalRate;
-                    showFloatingMessage(`恢复 ${originalRate} 倍速播放`);
-                }
-
-                downCount = 0; // 重置按下计数
             };
 
-            // 绑定事件监听器
+            // 添加事件监听器
             document.addEventListener("keydown", keydownListener, true);
             document.addEventListener("keyup", keyupListener, true);
 
-            return true;
+            // 监听URL变化（用于SPA网站）
+            urlObserver = new MutationObserver(() => {
+                if (location.href !== currentUrl) {
+                    currentUrl = location.href;
+                    console.log("URL变化，重新初始化");
+                    cleanup();
+                    setTimeout(() => {
+                        init().catch(console.error);
+                    }, 1000);
+                }
+            });
+
+            urlObserver.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+            activeObservers.add(urlObserver);
+
         } catch (error) {
             console.error("初始化失败:", error);
-            return false;
+            // 如果是超时或未找到视频，尝试延迟重新初始化
+            if (error && (error.type === "timeout" || error.type === "no_video")) {
+                setTimeout(() => {
+                    init().catch(console.error);
+                }, 5000);
+            }
         }
     }
 
