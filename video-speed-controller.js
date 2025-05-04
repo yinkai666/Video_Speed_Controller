@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.2.8
+// @version      1.2.9
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站，可通过点击选择控制多个视频。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites. Click to select which video to control when multiple videos exist.
 // @author       ternece
@@ -40,22 +40,22 @@
 
     // 获取临时启用的域名列表
     let tempEnabledDomains = GM_getValue('tempEnabledDomains', []);
-    
+
     // 获取当前域名
     const currentDomain = window.location.hostname;
-    
+
     // 检查当前网站是否应该启用脚本
     function shouldEnableScript() {
         // 检查是否匹配预定义规则（YouTube 和 Bilibili）
-        if (currentDomain.includes('youtube.com') || 
+        if (currentDomain.includes('youtube.com') ||
             (currentDomain.includes('bilibili.com') && window.location.pathname.includes('/video/'))) {
             return true;
         }
-        
+
         // 检查是否在临时启用列表中
         return tempEnabledDomains.includes(currentDomain);
     }
-    
+
     // 如果当前网站不应该启用脚本，则退出
     if (!shouldEnableScript()) {
         // 注册启用当前网站的菜单命令
@@ -70,7 +70,7 @@
         });
         return; // 退出脚本执行
     }
-    
+
     // 显示通知
     function showNotification(message) {
         if (typeof GM_notification !== 'undefined') {
@@ -145,7 +145,7 @@
             }
         }
     });
-    
+
     // 添加从临时启用列表中移除当前网站的菜单命令
     if (tempEnabledDomains.includes(currentDomain)) {
         GM_registerMenuCommand('从临时启用列表中移除当前网站', () => {
@@ -157,7 +157,7 @@
             }
         });
     }
-    
+
     // 添加查看所有临时启用网站的菜单命令
     GM_registerMenuCommand('查看所有临时启用的网站', () => {
         if (tempEnabledDomains.length === 0) {
@@ -176,7 +176,9 @@
     let activeObservers = new Set();
     let activeVideo = null; // 当前激活的视频
     let videoControlButtons = new Map(); // 存储视频和对应的控制按钮
-    
+    let rightKeyTimer = null; // 用于长按检测的定时器
+    const LONG_PRESS_DELAY = 200; // 长按判定时间（毫秒）
+
     // 完整的清理函数
     function cleanup() {
         // 清理所有事件监听器
@@ -230,65 +232,79 @@
         button.style.zIndex = '9999';
         button.style.transition = 'background-color 0.3s';
         button.style.userSelect = 'none';
-        
+
         // 如果是第一个视频，默认设为激活状态
         if (!activeVideo) {
             activeVideo = video;
             button.style.backgroundColor = 'rgba(0, 128, 255, 0.8)';
         }
-        
+
         // 点击事件：激活该视频的控制
         button.addEventListener('click', () => {
             // 取消之前激活的视频按钮样式
             videoControlButtons.forEach((btn) => {
                 btn.style.backgroundColor = 'rgba(0, 0, 0, 0.6)';
             });
-            
+
             // 设置当前视频为激活状态
             activeVideo = video;
             button.style.backgroundColor = 'rgba(0, 128, 255, 0.8)';
             showFloatingMessage(`已切换到视频 ${index} 控制`);
         });
-        
+
         // 将按钮添加到视频容器
         const videoContainer = video.parentElement || document.body;
-        
+
         // 确保视频容器有相对或绝对定位，以便正确放置按钮
         const containerPosition = window.getComputedStyle(videoContainer).position;
         if (containerPosition !== 'relative' && containerPosition !== 'absolute' && containerPosition !== 'fixed') {
             videoContainer.style.position = 'relative';
         }
-        
+
         videoContainer.appendChild(button);
         videoControlButtons.set(video, button);
-        
+
         return button;
     }
-    
+
     // 检测页面中的所有视频并添加控制按钮
     function detectAndSetupVideos() {
         const videos = document.querySelectorAll('video');
         if (videos.length === 0) return null;
-        
-        // 为每个视频添加控制按钮
+
+        // 如果只有一个视频,直接设置为激活视频,不创建控制按钮
+        if (videos.length === 1) {
+            const video = videos[0];
+            if (video.readyState >= 1) {
+                // 如果这个视频还没有被设置为激活视频
+                if (!activeVideo) {
+                    activeVideo = video;
+                    video.playbackRate = settings.defaultRate;
+                }
+                return activeVideo;
+            }
+            return null;
+        }
+
+        // 如果有多个视频,才创建控制按钮
         videos.forEach((video, index) => {
             // 跳过已经有控制按钮的视频
             if (videoControlButtons.has(video)) return;
-            
+
             // 确保视频已经加载
             if (video.readyState >= 1) {
                 createVideoControlButton(video, index + 1);
-                
+
                 // 设置默认播放速度
                 video.playbackRate = settings.defaultRate;
             }
         });
-        
-        // 如果没有激活的视频，选择第一个
+
+        // 如果没有激活的视频,选择第一个
         if (!activeVideo && videos.length > 0) {
             activeVideo = videos[0];
         }
-        
+
         return activeVideo;
     }
 
@@ -301,18 +317,18 @@
             const checkVideo = () => {
                 // 检测所有视频并设置控制按钮
                 const video = detectAndSetupVideos();
-                
+
                 // 添加对 YouTube 播放器的特殊处理
                 if (location.hostname.includes('youtube.com')) {
                     // 尝试多个可能的选择器
-                    const youtubeVideo = document.querySelector('.html5-main-video') || 
+                    const youtubeVideo = document.querySelector('.html5-main-video') ||
                                       document.querySelector('video.video-stream') ||
                                       document.querySelector('.html5-video-player video');
                     if (youtubeVideo && youtubeVideo.readyState >= 1) {
                         console.log('找到YouTube视频元素:', youtubeVideo);
                         // 设置默认播放速度
                         youtubeVideo.playbackRate = settings.defaultRate;
-                        
+
                         // 如果还没有激活的视频，将YouTube视频设为激活状态
                         if (!activeVideo) {
                             activeVideo = youtubeVideo;
@@ -321,7 +337,7 @@
                                 createVideoControlButton(youtubeVideo, 1);
                             }
                         }
-                        
+
                         return activeVideo;
                     }
                     console.log('YouTube视频元素未就绪');
@@ -410,7 +426,7 @@
             videoObserver = new MutationObserver((mutations) => {
                 detectAndSetupVideos();
             });
-            
+
             videoObserver.observe(document.body, {
                 childList: true,
                 subtree: true
@@ -485,7 +501,7 @@
                 if (isInputFocused) {
                     return; // 如果焦点在输入区域，则不执行快捷键
                 }
-                
+
                 // 确保有激活的视频
                 if (!activeVideo) {
                     console.log('没有激活的视频');
@@ -494,7 +510,7 @@
 
                 // YouTube 特殊处理
                 if (location.hostname.includes('youtube.com')) {
-                    const videoPlayer = document.querySelector('.html5-video-player') || 
+                    const videoPlayer = document.querySelector('.html5-video-player') ||
                                       document.querySelector('#movie_player');
                     if (!videoPlayer) {
                         console.log('未找到YouTube播放器元素');
@@ -503,7 +519,7 @@
 
                     // 检查事件是否发生在视频播放器区域内
                     const isInVideoPlayer = videoPlayer.contains(e.target) || e.target === videoPlayer;
-                    
+
                     // 如果不在视频播放器区域内，不处理事件
                     if (!isInVideoPlayer) {
                         return;
@@ -547,23 +563,21 @@
                 if (e.code === key) {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    
+
                     // 第一次按下时保存原始速度
                     if (downCount === 0) {
                         originalRate = activeVideo.playbackRate;
+
+                        // 设置定时器检测长按
+                        rightKeyTimer = setTimeout(() => {
+                            // 达到长按时间后，启用倍速播放
+                            activeVideo.playbackRate = targetRate;
+                            showFloatingMessage(`倍速播放: ${targetRate}x`);
+                            downCount = 3; // 设置为长按状态
+                        }, LONG_PRESS_DELAY);
                     }
-                    
+
                     downCount++;
-                    
-                    // 长按超过一定次数后启用倍速
-                    if (downCount >= 3) {
-                        activeVideo.playbackRate = targetRate;
-                        showFloatingMessage(`倍速播放: ${targetRate}x`);
-                    } else {
-                        // 短按为快进
-                        activeVideo.currentTime = Math.min(activeVideo.duration, activeVideo.currentTime + 5);
-                        showFloatingMessage(`快进 5 秒`);
-                    }
                 }
 
                 // 增加目标倍速：+ 键
@@ -613,11 +627,24 @@
             // 按键释放事件
             keyupListener = (e) => {
                 if (e.code === key) {
+                    // 清除定时器
+                    if (rightKeyTimer) {
+                        clearTimeout(rightKeyTimer);
+                        rightKeyTimer = null;
+
+                        // 如果不是长按状态（downCount < 3），则执行快进
+                        if (downCount < 3) {
+                            activeVideo.currentTime = Math.min(activeVideo.duration, activeVideo.currentTime + 5);
+                            showFloatingMessage(`快进 5 秒`);
+                        }
+                    }
+
                     // 如果是长按状态，恢复原始速度
                     if (downCount >= 3 && activeVideo) {
                         activeVideo.playbackRate = originalRate;
                         showFloatingMessage(`恢复播放速度: ${originalRate.toFixed(1)}x`);
                     }
+
                     downCount = 0;
                 }
             };
