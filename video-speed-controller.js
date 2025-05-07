@@ -555,6 +555,12 @@
                 if (e.code === 'ArrowLeft') {
                     e.preventDefault();
                     e.stopImmediatePropagation();
+                    
+                    // 检查视频是否暂停，如果是则先播放
+                    if (activeVideo.paused) {
+                        activeVideo.play();
+                    }
+                    
                     activeVideo.currentTime = Math.max(0, activeVideo.currentTime - 5);
                     showFloatingMessage(`快退 5 秒`);
                 }
@@ -563,6 +569,11 @@
                 if (e.code === key) {
                     e.preventDefault();
                     e.stopImmediatePropagation();
+                    
+                    // 检查视频是否暂停，如果是则先播放
+                    if (activeVideo.paused) {
+                        activeVideo.play();
+                    }
 
                     // 第一次按下时保存原始速度
                     if (downCount === 0) {
