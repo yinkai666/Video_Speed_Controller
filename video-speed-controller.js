@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
+// @version      1.3.1
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站，可通过点击选择控制多个视频。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites. Click to select which video to control when multiple videos exist.
 // @author       ternece
@@ -269,12 +269,58 @@
 
     // 检测页面中的所有视频并添加控制按钮
     function detectAndSetupVideos() {
-        const videos = document.querySelectorAll('video');
-        if (videos.length === 0) return null;
+        // 收集所有视频元素，包括常规DOM、iframe和Shadow DOM中的视频
+        const allVideos = [];
+        
+        // 1. 常规DOM中的视频
+        const regularVideos = document.querySelectorAll('video');
+        regularVideos.forEach(video => allVideos.push(video));
+        
+        // 2. 查找所有iframe
+        try {
+            const iframes = document.querySelectorAll('iframe');
+            iframes.forEach(iframe => {
+                try {
+                    // 尝试访问iframe内容（同源策略可能阻止）
+                    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+                    if (iframeDoc) {
+                        const iframeVideos = iframeDoc.querySelectorAll('video');
+                        iframeVideos.forEach(video => allVideos.push(video));
+                    }
+                } catch (e) {
+                    console.log('无法访问iframe内容（可能是跨域限制）:', e);
+                }
+            });
+        } catch (e) {
+            console.log('处理iframe时出错:', e);
+        }
+        
+        // 3. 查找所有Shadow DOM
+        try {
+            // 获取所有可能包含Shadow DOM的元素
+            const allElements = document.querySelectorAll('*');
+            allElements.forEach(el => {
+                try {
+                    // 检查元素是否有Shadow Root
+                    if (el.shadowRoot) {
+                        const shadowVideos = el.shadowRoot.querySelectorAll('video');
+                        shadowVideos.forEach(video => allVideos.push(video));
+                    }
+                } catch (e) {
+                    // 忽略访问Shadow DOM时的错误
+                }
+            });
+        } catch (e) {
+            console.log('处理Shadow DOM时出错:', e);
+        }
+        
+        console.log(`找到视频元素总数: ${allVideos.length}`);
+        
+        if (allVideos.length === 0) return null;
 
         // 如果只有一个视频,直接设置为激活视频,不创建控制按钮
-        if (videos.length === 1) {
-            const video = videos[0];
+        if (allVideos.length === 1) {
+            const video = allVideos[0];
             if (video.readyState >= 1) {
                 // 如果这个视频还没有被设置为激活视频
                 if (!activeVideo) {
@@ -287,7 +333,7 @@
         }
 
         // 如果有多个视频,才创建控制按钮
-        videos.forEach((video, index) => {
+        allVideos.forEach((video, index) => {
             // 跳过已经有控制按钮的视频
             if (videoControlButtons.has(video)) return;
 
@@ -301,8 +347,8 @@
         });
 
         // 如果没有激活的视频,选择第一个
-        if (!activeVideo && videos.length > 0) {
-            activeVideo = videos[0];
+        if (!activeVideo && allVideos.length > 0) {
+            activeVideo = allVideos[0];
         }
 
         return activeVideo;
@@ -311,14 +357,17 @@
     // 等待视频元素加载
     function waitForVideoElement() {
         return new Promise((resolve, reject) => {
-            const maxAttempts = 10;
+            const maxAttempts = 20; // 增加最大尝试次数
             let attempts = 0;
 
             const checkVideo = () => {
+                console.log(`尝试检测视频元素 (${attempts+1}/${maxAttempts})...`);
+                
                 // 检测所有视频并设置控制按钮
                 const video = detectAndSetupVideos();
 
-                // 添加对 YouTube 播放器的特殊处理
+                // 添加对特定网站的特殊处理
+                // YouTube 特殊处理
                 if (location.hostname.includes('youtube.com')) {
                     // 尝试多个可能的选择器
                     const youtubeVideo = document.querySelector('.html5-main-video') ||
@@ -341,10 +390,9 @@
                         return activeVideo;
                     }
                     console.log('YouTube视频元素未就绪');
-                    return null;
-                } else {
-                    return video; // 返回检测到的视频或null
                 }
+                
+                return video; // 返回检测到的视频或null
             };
 
             // 立即检查
@@ -364,6 +412,12 @@
                 } else if (attempts >= maxAttempts) {
                     observer.disconnect();
                     console.warn("未找到视频元素，脚本已停止运行");
+                    // 在控制台中显示调试信息
+                    console.log("调试信息: 页面上的iframe数量:", document.querySelectorAll('iframe').length);
+                    console.log("调试信息: 页面上的video标签数量:", document.querySelectorAll('video').length);
+                    
+                    // 尝试手动激活脚本
+                    showFloatingMessage("未找到视频元素，请尝试在菜单中手动启用此网站");
                     reject({ type: "no_video" }); // 使用对象替代 Error
                 }
             });
@@ -374,13 +428,15 @@
             });
             activeObservers.add(observer);
 
-            // 设置超时
+            // 设置超时（增加到20秒）
             setTimeout(() => {
                 observer.disconnect();
                 activeObservers.delete(observer);
                 console.warn("等待视频元素超时，脚本已停止运行");
+                // 显示超时消息
+                showFloatingMessage("视频检测超时，请尝试在菜单中手动启用此网站");
                 reject({ type: "timeout" }); // 使用对象替代 Error
-            }, 10000);
+            }, 20000); // 增加到20秒
         });
     }
 
@@ -414,12 +470,133 @@
         }, 2000); // 2秒后消失
     }
 
+    // 尝试深度查找视频元素，包括处理复杂的嵌入式播放器
+    function deepFindVideoElements() {
+        console.log('开始深度查找视频元素...');
+        const foundVideos = [];
+        
+        // 递归查找函数
+        function findVideosInElement(element, depth = 0) {
+            if (depth > 10) return; // 防止无限递归
+            
+            // 检查当前元素是否为video
+            if (element.tagName && element.tagName.toLowerCase() === 'video') {
+                console.log('找到视频元素:', element);
+                foundVideos.push(element);
+                return;
+            }
+            
+            // 检查Shadow DOM
+            if (element.shadowRoot) {
+                try {
+                    const shadowVideos = element.shadowRoot.querySelectorAll('video');
+                    shadowVideos.forEach(video => {
+                        console.log('在Shadow DOM中找到视频:', video);
+                        foundVideos.push(video);
+                    });
+                    
+                    // 继续递归查找Shadow DOM中的其他元素
+                    const shadowChildren = element.shadowRoot.querySelectorAll('*');
+                    shadowChildren.forEach(child => findVideosInElement(child, depth + 1));
+                } catch (e) {
+                    console.log('访问Shadow DOM时出错:', e);
+                }
+            }
+            
+            // 检查iframe
+            if (element.tagName && element.tagName.toLowerCase() === 'iframe') {
+                try {
+                    const iframeDoc = element.contentDocument || element.contentWindow?.document;
+                    if (iframeDoc) {
+                        const iframeVideos = iframeDoc.querySelectorAll('video');
+                        iframeVideos.forEach(video => {
+                            console.log('在iframe中找到视频:', video);
+                            foundVideos.push(video);
+                        });
+                        
+                        // 继续递归查找iframe中的元素
+                        const iframeChildren = iframeDoc.querySelectorAll('*');
+                        iframeChildren.forEach(child => findVideosInElement(child, depth + 1));
+                    }
+                } catch (e) {
+                    console.log('访问iframe内容时出错（可能是跨域限制）:', e);
+                }
+            }
+            
+            // 递归查找子元素
+            if (element.children && element.children.length > 0) {
+                Array.from(element.children).forEach(child => {
+                    findVideosInElement(child, depth + 1);
+                });
+            }
+        }
+        
+        // 从body开始递归查找
+        findVideosInElement(document.body);
+        
+        // 查找特定网站的视频播放器
+        if (location.hostname.includes('onscreens.me') || location.hostname.includes('stripchat')) {
+            console.log('检测到特殊网站，尝试查找特定播放器元素...');
+            
+            // 查找可能的视频播放器容器
+            const mediaElements = document.querySelectorAll(
+                'video, audio, [id*="player"], [class*="player"], ' +
+                '[id*="video"], [class*="video"], [id*="stream"], [class*="stream"], ' +
+                '[id*="media"], [class*="media"], object, embed'
+            );
+            
+            mediaElements.forEach(el => {
+                // 检查元素是否有src属性或source子元素
+                if (el.src || el.querySelector('source')) {
+                    console.log('找到可能的媒体元素:', el);
+                    if (el.tagName.toLowerCase() === 'video') {
+                        foundVideos.push(el);
+                    }
+                }
+                
+                // 递归查找这个元素内部
+                findVideosInElement(el);
+            });
+        }
+        
+        console.log(`深度查找完成，共找到 ${foundVideos.length} 个视频元素`);
+        return foundVideos;
+    }
+    
     // 初始化脚本
     async function init() {
         cleanup();
 
         try {
-            const video = await waitForVideoElement();
+            // 先尝试常规方法查找视频
+            let video = await waitForVideoElement();
+            
+            // 如果常规方法失败，尝试深度查找
+            if (!video) {
+                console.log('常规方法未找到视频，尝试深度查找...');
+                const deepVideos = deepFindVideoElements();
+                
+                if (deepVideos.length > 0) {
+                    // 使用找到的第一个视频
+                    video = deepVideos[0];
+                    activeVideo = video;
+                    video.playbackRate = settings.defaultRate;
+                    
+                    // 如果有多个视频，为它们创建控制按钮
+                    if (deepVideos.length > 1) {
+                        deepVideos.forEach((v, index) => {
+                            if (!videoControlButtons.has(v) && v.readyState >= 1) {
+                                createVideoControlButton(v, index + 1);
+                            }
+                        });
+                    }
+                    
+                    showFloatingMessage(`通过深度查找发现了 ${deepVideos.length} 个视频元素`);
+                } else {
+                    throw { type: "no_video" };
+                }
+            }
+            
             console.log("找到视频元素：", video);
 
             // 创建一个观察器来监视新的视频元素
@@ -547,8 +724,92 @@
 
                 // 全屏切换：回车键
                 if (e.code === 'Enter') {
-                    // ... existing code ...
-                    // 注意：在全屏代码中，使用activeVideo替代video
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    
+                    // 针对B站的特殊处理
+                    if (location.hostname.includes('bilibili.com')) {
+                        // 使用准确的选择器查找B站的全屏按钮
+                        const fullscreenBtn = document.querySelector('.bpx-player-ctrl-full') || 
+                                             document.querySelector('[aria-label="全屏"]') ||
+                                             document.querySelector('.bilibili-player-video-btn-fullscreen') ||
+                                             document.querySelector('.ytp-fullscreen-button');
+                        
+                        if (fullscreenBtn) {
+                            // 模拟点击全屏按钮
+                            fullscreenBtn.click();
+                            return; // 成功处理，直接返回
+                        } else {
+                            console.log('未找到B站全屏按钮，使用默认全屏API');
+                            // 如果找不到按钮，继续使用默认API
+                        }
+                    }
+                    // 针对YouTube的特殊处理
+                    else if (location.hostname.includes('youtube.com')) {
+                        // 使用准确的选择器查找YouTube的全屏按钮
+                        const ytFullscreenBtn = document.querySelector('.ytp-fullscreen-button') || 
+                                              document.querySelector('[data-title-no-tooltip="全屏"]') ||
+                                              document.querySelector('[aria-keyshortcuts="f"]') ||
+                                              document.querySelector('[data-title-no-tooltip="全屏 (f)"]');
+                        
+                        if (ytFullscreenBtn) {
+                            // 模拟点击全屏按钮
+                            ytFullscreenBtn.click();
+                            return; // 成功处理，直接返回
+                        } else {
+                            console.log('未找到YouTube全屏按钮，使用默认全屏API');
+                            // 如果找不到按钮，继续使用默认API
+                        }
+                    }
+                    
+                    // 默认全屏API（用于其他网站或找不到特定网站按钮时）
+                    if (!document.fullscreenElement) {
+                        if (activeVideo.requestFullscreen) {
+                            activeVideo.requestFullscreen();
+                        } else if (activeVideo.webkitRequestFullscreen) {
+                            activeVideo.webkitRequestFullscreen();
+                        } else if (activeVideo.msRequestFullscreen) {
+                            activeVideo.msRequestFullscreen();
+                        }
+                        showFloatingMessage('进入全屏');
+                    } else {
+                        if (document.exitFullscreen) {
+                            document.exitFullscreen();
+                        } else if (document.webkitExitFullscreen) {
+                            document.webkitExitFullscreen();
+                        } else if (document.msExitFullscreen) {
+                            document.msExitFullscreen();
+                        }
+                        showFloatingMessage('退出全屏');
+                    }
+                }
+                
+                // 空格键暂停/播放功能
+                if (e.code === 'Space') {
+                    // 检查是否在输入框中
+                    const isInInputField = (element) => {
+                        if (!element || !element.tagName) return false;
+                        const tagName = element.tagName.toLowerCase();
+                        return tagName === 'input' || tagName === 'textarea' || element.isContentEditable;
+                    };
+                    
+                    if (isInInputField(e.target)) {
+                        return; // 如果在输入框中，不拦截空格键
+                    }
+                    
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    
+                    // 直接使用视频元素的原生播放/暂停API
+                    if (activeVideo) {
+                        if (activeVideo.paused) {
+                            activeVideo.play();
+                            showFloatingMessage('播放');
+                        } else {
+                            activeVideo.pause();
+                            showFloatingMessage('暂停');
+                        }
+                    }
                 }
 
                 // 快退/快进：左右方向键
