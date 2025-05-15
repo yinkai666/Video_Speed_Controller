@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.3.2
+// @version      1.3.3
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站，可通过点击选择控制多个视频。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites. Click to select which video to control when multiple videos exist.
 // @author       ternece
@@ -417,7 +417,7 @@
                     console.log("调试信息: 页面上的video标签数量:", document.querySelectorAll('video').length);
                     
                     // 尝试手动激活脚本
-                    showFloatingMessage("未找到视频元素，请尝试在菜单中手动启用此网站");
+                    // showFloatingMessage("未找到视频元素，请尝试在菜单中手动启用此网站");
                     reject({ type: "no_video" }); // 使用对象替代 Error
                 }
             });
@@ -434,7 +434,7 @@
                 activeObservers.delete(observer);
                 console.warn("等待视频元素超时，脚本已停止运行");
                 // 显示超时消息
-                showFloatingMessage("视频检测超时，请尝试在菜单中手动启用此网站");
+                // showFloatingMessage("视频检测超时，请尝试在菜单中手动启用此网站");
                 reject({ type: "timeout" }); // 使用对象替代 Error
             }, 10000); // 增加到20秒
         });
