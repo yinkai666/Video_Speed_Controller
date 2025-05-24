@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.3.3
+// @version      1.3.4
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站，可通过点击选择控制多个视频。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites. Click to select which video to control when multiple videos exist.
 // @author       ternece
@@ -318,21 +318,62 @@
         
         if (allVideos.length === 0) return null;
 
-        // 如果只有一个视频,直接设置为激活视频,不创建控制按钮
-        if (allVideos.length === 1) {
-            const video = allVideos[0];
-            if (video.readyState >= 1) {
-                // 如果这个视频还没有被设置为激活视频
-                if (!activeVideo) {
-                    activeVideo = video;
-                    video.playbackRate = settings.defaultRate;
-                }
-                return activeVideo;
+        // 检查是否为哔哩哔哩或YouTube网站
+    const isBilibili = currentDomain.includes('bilibili.com');
+    const isYoutube = currentDomain.includes('youtube.com');
+    
+    // 如果只有一个视频,直接设置为激活视频,不创建控制按钮
+    if (allVideos.length === 1) {
+        const video = allVideos[0];
+        if (video.readyState >= 1) {
+            // 如果这个视频还没有被设置为激活视频
+            if (!activeVideo) {
+                activeVideo = video;
+                video.playbackRate = settings.defaultRate;
             }
-            return null;
+            return activeVideo;
         }
-
-        // 如果有多个视频,才创建控制按钮
+        return null;
+    }
+    
+    // 如果有多个视频，根据网站类型决定是否创建控制按钮
+    if (isBilibili || isYoutube) {
+        // 检查当前的 activeVideo 是否仍然有效
+        const isActiveVideoValid = activeVideo && 
+                                  allVideos.includes(activeVideo) && 
+                                  activeVideo.readyState >= 1 &&
+                                  !activeVideo.paused !== undefined; // 确保视频元素仍然有效
+        
+        if (isActiveVideoValid) {
+            // 如果当前的 activeVideo 仍然有效，不要改变它
+            console.log('保持当前的 activeVideo');
+            return activeVideo;
+        }
+        
+        // 只有在 activeVideo 无效时才重新寻找主视频
+        let mainVideo = null;
+        
+        if (isBilibili) {
+            // 在哔哩哔哩中，优先选择正在播放的视频
+            mainVideo = allVideos.find(video => !video.paused && video.currentTime > 0) ||
+                       allVideos.find(video => {
+                           const rect = video.getBoundingClientRect();
+                           return rect.width > 400 && rect.height > 200;
+                       }) || allVideos[0];
+        } else if (isYoutube) {
+            mainVideo = allVideos.find(video => 
+                video.classList.contains('html5-main-video') ||
+                video.classList.contains('video-stream')
+            ) || allVideos[0];
+        }
+        
+        if (mainVideo && mainVideo.readyState >= 1) {
+            activeVideo = mainVideo;
+            mainVideo.playbackRate = settings.defaultRate;
+            console.log('设置新的主视频为 activeVideo');
+        }
+    } else {
+        // 在其他网站中，创建控制按钮
         allVideos.forEach((video, index) => {
             // 跳过已经有控制按钮的视频
             if (videoControlButtons.has(video)) return;
@@ -340,18 +381,18 @@
             // 确保视频已经加载
             if (video.readyState >= 1) {
                 createVideoControlButton(video, index + 1);
-
                 // 设置默认播放速度
                 video.playbackRate = settings.defaultRate;
+                
+                // 如果还没有激活视频，将第一个可用视频设为激活视频
+                if (!activeVideo) {
+                    activeVideo = video;
+                }
             }
         });
+    }
 
-        // 如果没有激活的视频,选择第一个
-        if (!activeVideo && allVideos.length > 0) {
-            activeVideo = allVideos[0];
-        }
-
-        return activeVideo;
+    return activeVideo;
     }
 
     // 等待视频元素加载
@@ -381,10 +422,6 @@
                         // 如果还没有激活的视频，将YouTube视频设为激活状态
                         if (!activeVideo) {
                             activeVideo = youtubeVideo;
-                            // 为YouTube视频创建控制按钮
-                            if (!videoControlButtons.has(youtubeVideo)) {
-                                createVideoControlButton(youtubeVideo, 1);
-                            }
                         }
 
                         return activeVideo;
