@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.3.4
+// @version      1.3.5
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站，可通过点击选择控制多个视频。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites. Click to select which video to control when multiple videos exist.
 // @author       ternece
@@ -168,6 +168,8 @@
     });
 
     let currentUrl = location.href;
+    // 记录用户最近手动调整播放速度的时间戳
+    let lastManualRateChangeTime = 0;
     let videoObserver = null;
     let keydownListener = null;
     let keyupListener = null;
@@ -267,6 +269,9 @@
         return button;
     }
 
+    // 调试开关
+    const DEBUG = false;
+
     // 检测页面中的所有视频并添加控制按钮
     function detectAndSetupVideos() {
         // 收集所有视频元素，包括常规DOM、iframe和Shadow DOM中的视频
@@ -281,18 +286,20 @@
             const iframes = document.querySelectorAll('iframe');
             iframes.forEach(iframe => {
                 try {
-                    // 尝试访问iframe内容（同源策略可能阻止）
+                    // 只尝试访问同源iframe
+                    if (iframe.src && !iframe.src.startsWith(window.location.origin)) return;
                     const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
                     if (iframeDoc) {
                         const iframeVideos = iframeDoc.querySelectorAll('video');
                         iframeVideos.forEach(video => allVideos.push(video));
                     }
                 } catch (e) {
-                    console.log('无法访问iframe内容（可能是跨域限制）:', e);
+                    // 不再输出任何内容，避免刷屏
+                    // console.log('无法访问iframe内容（可能是跨域限制）:', e);
                 }
             });
         } catch (e) {
-            console.log('处理iframe时出错:', e);
+            if (DEBUG) console.log('处理iframe时出错:', e);
         }
         
         // 3. 查找所有Shadow DOM
@@ -311,10 +318,10 @@
                 }
             });
         } catch (e) {
-            console.log('处理Shadow DOM时出错:', e);
+            if (DEBUG) console.log('处理Shadow DOM时出错:', e);
         }
         
-        console.log(`找到视频元素总数: ${allVideos.length}`);
+        if (DEBUG) console.log(`找到视频元素总数: ${allVideos.length}`);
         
         if (allVideos.length === 0) return null;
 
@@ -329,7 +336,10 @@
             // 如果这个视频还没有被设置为激活视频
             if (!activeVideo) {
                 activeVideo = video;
-                video.playbackRate = settings.defaultRate;
+                // 仅当用户最近未手动调整过播放速度时才设置默认速度
+                if (Date.now() - lastManualRateChangeTime > 5000) {
+                    video.playbackRate = settings.defaultRate;
+                }
             }
             return activeVideo;
         }
@@ -346,7 +356,7 @@
         
         if (isActiveVideoValid) {
             // 如果当前的 activeVideo 仍然有效，不要改变它
-            console.log('保持当前的 activeVideo');
+            // console.log('保持当前的 activeVideo');
             return activeVideo;
         }
         
@@ -369,7 +379,10 @@
         
         if (mainVideo && mainVideo.readyState >= 1) {
             activeVideo = mainVideo;
-            mainVideo.playbackRate = settings.defaultRate;
+            // 仅当用户最近未手动调整过播放速度时才设置默认速度
+            if (Date.now() - lastManualRateChangeTime > 5000) {
+                mainVideo.playbackRate = settings.defaultRate;
+            }
             console.log('设置新的主视频为 activeVideo');
         }
     } else {
@@ -381,9 +394,10 @@
             // 确保视频已经加载
             if (video.readyState >= 1) {
                 createVideoControlButton(video, index + 1);
-                // 设置默认播放速度
-                video.playbackRate = settings.defaultRate;
-                
+                // 仅当用户最近未手动调整过播放速度时才设置默认速度
+                if (Date.now() - lastManualRateChangeTime > 5000) {
+                    video.playbackRate = settings.defaultRate;
+                }
                 // 如果还没有激活视频，将第一个可用视频设为激活视频
                 if (!activeVideo) {
                     activeVideo = video;
@@ -570,31 +584,7 @@
         
         // 从body开始递归查找
         findVideosInElement(document.body);
-        
-        // 查找特定网站的视频播放器
-        if (location.hostname.includes('onscreens.me') || location.hostname.includes('stripchat')) {
-            console.log('检测到特殊网站，尝试查找特定播放器元素...');
-            
-            // 查找可能的视频播放器容器
-            const mediaElements = document.querySelectorAll(
-                'video, audio, [id*="player"], [class*="player"], ' +
-                '[id*="video"], [class*="video"], [id*="stream"], [class*="stream"], ' +
-                '[id*="media"], [class*="media"], object, embed'
-            );
-            
-            mediaElements.forEach(el => {
-                // 检查元素是否有src属性或source子元素
-                if (el.src || el.querySelector('source')) {
-                    console.log('找到可能的媒体元素:', el);
-                    if (el.tagName.toLowerCase() === 'video') {
-                        foundVideos.push(el);
-                    }
-                }
-                
-                // 递归查找这个元素内部
-                findVideosInElement(el);
-            });
-        }
+
         
         console.log(`深度查找完成，共找到 ${foundVideos.length} 个视频元素`);
         return foundVideos;
@@ -617,8 +607,10 @@
                     // 使用找到的第一个视频
                     video = deepVideos[0];
                     activeVideo = video;
-                    video.playbackRate = settings.defaultRate;
-                    
+                    // 仅当用户最近未手动调整过播放速度时才设置默认速度
+                    if (Date.now() - lastManualRateChangeTime > 5000) {
+                        video.playbackRate = settings.defaultRate;
+                    }
                     // 如果有多个视频，为它们创建控制按钮
                     if (deepVideos.length > 1) {
                         deepVideos.forEach((v, index) => {
@@ -627,7 +619,6 @@
                             }
                         });
                     }
-                    
                     showFloatingMessage(`通过深度查找发现了 ${deepVideos.length} 个视频元素`);
                 } else {
                     throw { type: "no_video" };
@@ -894,6 +885,7 @@
                     e.preventDefault();
                     e.stopImmediatePropagation();
                     targetRate = Math.min(16, targetRate + settings.targetRateStep);
+                    lastManualRateChangeTime = Date.now();
                     showFloatingMessage(`目标倍速设置为: ${targetRate.toFixed(1)}x`);
                 }
 
@@ -902,6 +894,7 @@
                     e.preventDefault();
                     e.stopImmediatePropagation();
                     targetRate = Math.max(0.1, targetRate - settings.targetRateStep);
+                    lastManualRateChangeTime = Date.now();
                     showFloatingMessage(`目标倍速设置为: ${targetRate.toFixed(1)}x`);
                 }
 
@@ -911,6 +904,7 @@
                     e.stopImmediatePropagation();
                     currentQuickRate = Math.min(16, activeVideo.playbackRate + settings.quickRateStep);
                     activeVideo.playbackRate = currentQuickRate;
+                    lastManualRateChangeTime = Date.now();
                     showFloatingMessage(`播放速度: ${currentQuickRate.toFixed(1)}x`);
                 }
 
@@ -920,6 +914,7 @@
                     e.stopImmediatePropagation();
                     currentQuickRate = Math.max(0.1, activeVideo.playbackRate - settings.quickRateStep);
                     activeVideo.playbackRate = currentQuickRate;
+                    lastManualRateChangeTime = Date.now();
                     showFloatingMessage(`播放速度: ${currentQuickRate.toFixed(1)}x`);
                 }
 
@@ -929,6 +924,7 @@
                     e.stopImmediatePropagation();
                     activeVideo.playbackRate = 1.0;
                     currentQuickRate = 1.0;
+                    lastManualRateChangeTime = Date.now();
                     showFloatingMessage(`播放速度重置为 1.0x`);
                 }
 
