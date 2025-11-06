@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         视频倍速播放增强版 [测试版]
-// @name:en      Enhanced Video Speed Controller [Beta]
+// @name         视频倍速播放增强版
+// @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
 // @version      1.5.0
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。如遇兼容性问题，可在启用脚本后，通过油猴菜单执行"重新扫描以查找视频"。v1.5.0新增递归iframe扫描、类型安全检查、目标倍速持久化等特性。
