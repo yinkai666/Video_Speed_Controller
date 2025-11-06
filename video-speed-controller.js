@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         视频倍速播放增强版
-// @name:en      Enhanced Video Speed Controller
+// @name         视频倍速播放增强版 [测试版]
+// @name:en      Enhanced Video Speed Controller [Beta]
 // @namespace    http://tampermonkey.net/
-// @version      1.4.0
-// @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。如遇兼容性问题，可在启用脚本后，通过油猴菜单执行“重新扫描以查找视频”。
-// @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. For compatibility issues, use "Rescan for Videos" from the Tampermonkey menu after enabling the script.
+// @version      1.5.0
+// @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。如遇兼容性问题，可在启用脚本后，通过油猴菜单执行"重新扫描以查找视频"。v1.5.0新增递归iframe扫描、类型安全检查、目标倍速持久化等特性。
+// @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. For compatibility issues, use "Rescan for Videos" from the Tampermonkey menu after enabling the script. v1.5.0 adds recursive iframe scanning, type safety checks, and persistent target speed settings.
 // @author       ternece
 // @license      MIT
 // @match        *://*.youtube.com/*
@@ -100,6 +100,277 @@
         }, 2000);
     }
 
+    // 显示临时启用网站列表的浮动窗口
+    function showDomainListModal(controller) {
+        // 创建遮罩层
+        const overlay = document.createElement("div");
+        overlay.style.position = "fixed";
+        overlay.style.top = "0";
+        overlay.style.left = "0";
+        overlay.style.width = "100%";
+        overlay.style.height = "100%";
+        overlay.style.backgroundColor = "rgba(0, 0, 0, 0.5)";
+        overlay.style.zIndex = "10001";
+        overlay.style.display = "flex";
+        overlay.style.justifyContent = "center";
+        overlay.style.alignItems = "center";
+
+        // 创建模态框
+        const modal = document.createElement("div");
+        modal.style.backgroundColor = "white";
+        modal.style.borderRadius = "8px";
+        modal.style.padding = "20px";
+        modal.style.maxWidth = "600px";
+        modal.style.width = "90%";
+        modal.style.maxHeight = "80%";
+        modal.style.overflow = "auto";
+        modal.style.boxShadow = "0 4px 6px rgba(0, 0, 0, 0.1)";
+        modal.style.position = "relative";  // 为关闭按钮提供定位参考
+
+        // 标题
+        const title = document.createElement("h2");
+        title.textContent = "视频倍速控制器 - 临时启用列表";
+        title.style.margin = "0 0 15px 0";
+        title.style.fontSize = "18px";
+        title.style.color = "#333";
+        title.style.borderBottom = "2px solid #4CAF50";
+        title.style.paddingBottom = "10px";
+
+        // 关闭按钮
+        const closeButton = document.createElement("button");
+        closeButton.textContent = "×";
+        closeButton.style.position = "absolute";
+        closeButton.style.right = "20px";
+        closeButton.style.top = "20px";
+        closeButton.style.background = "none";
+        closeButton.style.border = "none";
+        closeButton.style.fontSize = "24px";
+        closeButton.style.cursor = "pointer";
+        closeButton.style.color = "#999";
+        closeButton.style.width = "30px";
+        closeButton.style.height = "30px";
+        closeButton.style.display = "flex";
+        closeButton.style.alignItems = "center";
+        closeButton.style.justifyContent = "center";
+        closeButton.onmouseover = () => { closeButton.style.color = "#333"; };
+        closeButton.onmouseout = () => { closeButton.style.color = "#999"; };
+
+        // 动作按钮区域
+        const actionBar = document.createElement("div");
+        actionBar.style.marginBottom = "10px";
+        actionBar.style.display = "flex";
+        actionBar.style.justifyContent = "space-between";
+        actionBar.style.alignItems = "center";
+
+        const counter = document.createElement("span");
+        counter.style.fontSize = "14px";
+        counter.style.color = "#666";
+
+        const clearAllButton = document.createElement("button");
+        clearAllButton.textContent = "一键清空";
+        clearAllButton.style.backgroundColor = "#f44336";
+        clearAllButton.style.color = "white";
+        clearAllButton.style.border = "none";
+        clearAllButton.style.padding = "8px 16px";
+        clearAllButton.style.borderRadius = "4px";
+        clearAllButton.style.cursor = "pointer";
+        clearAllButton.style.fontSize = "14px";
+        clearAllButton.style.fontWeight = "bold";
+        clearAllButton.style.transition = "background-color 0.2s";
+        clearAllButton.onmouseover = () => {
+            clearAllButton.style.backgroundColor = "#d32f2f";
+        };
+        clearAllButton.onmouseout = () => {
+            clearAllButton.style.backgroundColor = "#f44336";
+        };
+        clearAllButton.onclick = () => {
+            if (confirm('确定要删除所有临时启用的网站吗？')) {
+                controller.tempEnabledDomains = [];
+                GM_setValue('tempEnabledDomains', controller.tempEnabledDomains);
+                closeModal();
+                showFloatingMessage('已清空所有临时启用的网站，请刷新页面');
+            }
+        };
+
+        actionBar.appendChild(counter);
+        actionBar.appendChild(clearAllButton);
+
+        // 更新计数器和列表的函数
+        const updateDisplay = () => {
+            // 更新计数器
+            counter.textContent = `共 ${controller.tempEnabledDomains.length} 个网站已启用`;
+
+            // 清空并重新生成列表
+            listContainer.innerHTML = '';
+            if (controller.tempEnabledDomains.length === 0) {
+                const emptyMsg = document.createElement("p");
+                emptyMsg.textContent = "当前没有临时启用的网站";
+                emptyMsg.style.color = "#999";
+                emptyMsg.style.textAlign = "center";
+                emptyMsg.style.padding = "20px";
+                emptyMsg.style.fontSize = "14px";
+                listContainer.appendChild(emptyMsg);
+            } else {
+                controller.tempEnabledDomains.forEach((domain, index) => {
+                    const domainItem = document.createElement("div");
+                    domainItem.style.padding = "10px";
+                    domainItem.style.margin = "5px 0";
+                    domainItem.style.backgroundColor = "#f5f5f5";
+                    domainItem.style.borderRadius = "4px";
+                    domainItem.style.display = "flex";
+                    domainItem.style.alignItems = "center";
+                    domainItem.style.justifyContent = "space-between";
+
+                    const domainText = document.createElement("span");
+                    domainText.textContent = `${index + 1}. ${domain}`;
+                    domainText.style.fontFamily = "monospace";
+                    domainText.style.fontSize = "14px";
+                    domainText.style.color = "#333";
+
+                    const buttonGroup = document.createElement("div");
+                    buttonGroup.style.display = "flex";
+                    buttonGroup.style.gap = "8px";
+
+                    const statusBadge = document.createElement("span");
+                    statusBadge.textContent = "已启用";
+                    statusBadge.style.backgroundColor = "#4CAF50";
+                    statusBadge.style.color = "white";
+                    statusBadge.style.padding = "4px 8px";
+                    statusBadge.style.borderRadius = "4px";
+                    statusBadge.style.fontSize = "12px";
+
+                    const deleteButton = document.createElement("button");
+                    deleteButton.textContent = "删除";
+                    deleteButton.style.backgroundColor = "#ff9800";
+                    deleteButton.style.color = "white";
+                    deleteButton.style.border = "none";
+                    deleteButton.style.padding = "4px 12px";
+                    deleteButton.style.borderRadius = "4px";
+                    deleteButton.style.cursor = "pointer";
+                    deleteButton.style.fontSize = "12px";
+                    deleteButton.style.transition = "background-color 0.2s";
+                    deleteButton.onmouseover = () => {
+                        deleteButton.style.backgroundColor = "#f57c00";
+                    };
+                    deleteButton.onmouseout = () => {
+                        deleteButton.style.backgroundColor = "#ff9800";
+                    };
+                    deleteButton.onclick = () => {
+                        const idx = controller.tempEnabledDomains.indexOf(domain);
+                        if (idx !== -1) {
+                            controller.tempEnabledDomains.splice(idx, 1);
+                            GM_setValue('tempEnabledDomains', controller.tempEnabledDomains);
+                            updateDisplay();  // 不关闭模态窗口，只更新显示
+                            showFloatingMessage(`已移除 ${domain}`);
+                        }
+                    };
+
+                    buttonGroup.appendChild(statusBadge);
+                    buttonGroup.appendChild(deleteButton);
+
+                    domainItem.appendChild(domainText);
+                    domainItem.appendChild(buttonGroup);
+                    listContainer.appendChild(domainItem);
+                });
+            }
+        };
+
+        // 初始显示
+        updateDisplay();
+
+        // 网站列表容器
+        const listContainer = document.createElement("div");
+
+        // 提示文本
+        const tip = document.createElement("p");
+        tip.textContent = "提示：单个删除会立即生效。一键清空后请刷新页面使更改生效。";
+        tip.style.fontSize = "12px";
+        tip.style.color = "#666";
+        tip.style.marginTop = "15px";
+        tip.style.paddingTop = "10px";
+        tip.style.borderTop = "1px solid #eee";
+
+        // 组装模态框
+        modal.appendChild(closeButton);
+        modal.appendChild(title);
+        modal.appendChild(actionBar);
+        modal.appendChild(listContainer);
+        modal.appendChild(tip);
+
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+
+        // 关闭事件
+        const closeModal = () => {
+            overlay.style.opacity = "0";
+            setTimeout(() => {
+                document.body.removeChild(overlay);
+            }, 300);
+        };
+
+        closeButton.onclick = closeModal;
+        overlay.onclick = (e) => {
+            if (e.target === overlay) {
+                closeModal();
+            }
+        };
+
+        // ESC键关闭
+        const handleEsc = (e) => {
+            if (e.key === "Escape") {
+                closeModal();
+                document.removeEventListener("keydown", handleEsc);
+            }
+        };
+        document.addEventListener("keydown", handleEsc);
+    }
+
+    // 扫描iframe中的域名（递归版本）
+    function scanIframesForDomains() {
+        const domains = new Set();
+
+        const scanElement = (element, depth = 0) => {
+            if (depth > 5) return; // 防止无限递归，最大深度5层
+
+            // 查找所有iframe
+            const iframes = element.querySelectorAll ? element.querySelectorAll('iframe') : [];
+
+            iframes.forEach(iframe => {
+                try {
+                    // 尝试获取src
+                    const src = iframe.src || iframe.getAttribute('data-src') || iframe.getAttribute('src');
+                    if (src) {
+                        const url = new URL(src, window.location.href);
+                        if (url.hostname) {
+                            domains.add(url.hostname);
+                        }
+                    }
+                } catch (e) {
+                    // 忽略无法解析的URL
+                }
+            });
+
+            // 递归扫描shadow DOM
+            if (element.shadowRoot) {
+                scanElement(element.shadowRoot, depth + 1);
+            }
+
+            // 递归扫描iframe的contentDocument（可能因跨域失败）
+            iframes.forEach(iframe => {
+                try {
+                    if (iframe.contentDocument) {
+                        scanElement(iframe.contentDocument, depth + 1);
+                    }
+                } catch (e) {
+                    // 跨域访问被拒绝，忽略
+                }
+            });
+        };
+
+        scanElement(document.body);
+        return Array.from(domains);
+    }
+
     // 通用防抖函数
     function debounce(func, wait) {
         let timeout;
@@ -132,14 +403,24 @@
                 }
             }
 
-            // 1. 状态 (State)
-            this.settings = {
-                defaultRate: GM_getValue('defaultRate', DEFAULT_SETTINGS.defaultRate),
-                targetRate: GM_getValue('targetRate', DEFAULT_SETTINGS.targetRate),
-                quickRateStep: GM_getValue('quickRateStep', DEFAULT_SETTINGS.quickRateStep),
-                targetRateStep: GM_getValue('targetRateStep', DEFAULT_SETTINGS.targetRateStep)
+            // 1. 状态 (State) - 添加类型检查
+            const loadSetting = (key, defaultValue) => {
+                const value = GM_getValue(key, defaultValue);
+                const num = parseFloat(value);
+                return !isNaN(num) && num > 0 ? num : defaultValue;
             };
-            this.tempEnabledDomains = GM_getValue('tempEnabledDomains', []);
+
+            this.settings = {
+                defaultRate: loadSetting('defaultRate', DEFAULT_SETTINGS.defaultRate),
+                targetRate: DEFAULT_SETTINGS.targetRate,  // 不持久化目标倍速
+                quickRateStep: loadSetting('quickRateStep', DEFAULT_SETTINGS.quickRateStep),
+                targetRateStep: loadSetting('targetRateStep', DEFAULT_SETTINGS.targetRateStep)
+            };
+
+            // 类型检查：确保是数组
+            const domains = GM_getValue('tempEnabledDomains', []);
+            this.tempEnabledDomains = Array.isArray(domains) ? domains : [];
+
             this.currentDomain = window.location.hostname;
             this.currentUrl = location.href;
             this.lastManualRateChangeTime = 0;
@@ -191,10 +472,29 @@
         // 3. 菜单命令注册
         registerEnableCommand() {
             GM_registerMenuCommand('在当前网站启用视频倍速控制', () => {
-                if (!this.tempEnabledDomains.includes(this.currentDomain)) {
-                    this.tempEnabledDomains.push(this.currentDomain);
+                // 扫描页面中的iframe域名
+                const iframeDomains = scanIframesForDomains();
+                const domainsToEnable = [this.currentDomain, ...iframeDomains];
+
+                // 去重并添加到临时启用列表
+                let addedCount = 0;
+                domainsToEnable.forEach(domain => {
+                    if (!this.tempEnabledDomains.includes(domain)) {
+                        this.tempEnabledDomains.push(domain);
+                        addedCount++;
+                    }
+                });
+
+                if (addedCount > 0) {
                     GM_setValue('tempEnabledDomains', this.tempEnabledDomains);
-                    showNotification(`已在 ${this.currentDomain} 启用。请刷新页面，若视频仍无法控制，请使用菜单中的“重新扫描”功能。`);
+
+                    let message = `已启用以下域名：${domainsToEnable.join(', ')}`;
+                    if (iframeDomains.length > 0) {
+                        message += `\n\n发现 ${iframeDomains.length} 个嵌入视频域名也已一并启用`;
+                    }
+                    message += `\n\n请刷新页面，若视频仍无法控制，请使用菜单中的"重新扫描"功能。`;
+
+                    showNotification(message);
                 } else {
                     showNotification(`${this.currentDomain} 已经在启用列表中`);
                 }
@@ -208,16 +508,20 @@
                 this.registerEnableCommand();
             }
 
+            // 如果当前网站在临时启用列表中，显示删除选项
+            if (this.tempEnabledDomains.includes(this.currentDomain)) {
+                GM_registerMenuCommand('从临时启用列表中移除当前网站', () => {
+                    const index = this.tempEnabledDomains.indexOf(this.currentDomain);
+                    if (index !== -1) {
+                        this.tempEnabledDomains.splice(index, 1);
+                        GM_setValue('tempEnabledDomains', this.tempEnabledDomains);
+                        showNotification(`已从临时启用列表中移除 ${this.currentDomain}，请刷新页面`);
+                    }
+                });
+            }
 
             GM_registerMenuCommand('查看所有临时启用的网站', () => {
-                if (this.tempEnabledDomains.length === 0) {
-                    showFloatingMessage('当前没有临时启用的网站');
-                } else {
-                    console.log('--- 视频倍速控制器：临时启用的网站列表 ---');
-                    console.log(this.tempEnabledDomains.join('\n'));
-                    console.log('-------------------------------------------');
-                    showFloatingMessage('临时启用的网站列表已打印到控制台 (F12)');
-                }
+                showDomainListModal(this);
             });
         }
 
@@ -239,18 +543,6 @@
             GM_registerMenuCommand('设置长按右键倍速', () => this.updateSetting('targetRate', `请输入长按右键时的倍速 (0.1-${this.config.MAX_RATE})`));
             GM_registerMenuCommand('设置快速调速步长', () => this.updateSetting('quickRateStep', `请输入按 [ 或 ] 键调整速度的步长 (0.1-${this.config.MAX_QUICK_RATE_STEP})`, this.config.MAX_QUICK_RATE_STEP));
             GM_registerMenuCommand('设置目标倍速调整步长', () => this.updateSetting('targetRateStep', `请输入按 +/- 键调整目标倍速的步长 (0.1-${this.config.MAX_RATE})`));
-
-            // 如果当前网站是临时启用的，则提供“移除”选项
-            if (this.tempEnabledDomains.includes(this.currentDomain)) {
-                GM_registerMenuCommand('从临时启用列表中移除当前网站', () => {
-                    const index = this.tempEnabledDomains.indexOf(this.currentDomain);
-                    if (index !== -1) {
-                        this.tempEnabledDomains.splice(index, 1);
-                        GM_setValue('tempEnabledDomains', this.tempEnabledDomains);
-                        showNotification(`已从临时启用列表中移除 ${this.currentDomain}，请刷新页面`);
-                    }
-                });
-            }
         }
         
         updateSetting(key, promptMessage, max = this.config.MAX_RATE) {
@@ -384,6 +676,7 @@
 
         // 5. 清理与监听
         cleanup() {
+            // 清理键盘事件监听器
             if (this.keydownListener) {
                 window.removeEventListener("keydown", this.keydownListener, true);
                 this.keydownListener = null;
@@ -392,10 +685,21 @@
                 window.removeEventListener("keyup", this.keyupListener, true);
                 this.keyupListener = null;
             }
+
+            // 清理URL变化监听器
+            if (this._handleStateChange) {
+                window.removeEventListener('popstate', this._handleStateChange);
+                this._handleStateChange = null;
+            }
+
+            // 清理观察者
             this.activeObservers.forEach(observer => observer.disconnect());
             this.activeObservers.clear();
+
+            // 清理控制按钮
             this.videoControlButtons.forEach(button => button.remove());
             this.videoControlButtons.clear();
+
             this.activeVideo = null;
         }
 
@@ -410,23 +714,23 @@
             // MutationObserver 的部分已合并到 mainObserver 中
             // 这里只处理 History API 的监听
 
-            const handleStateChange = this.handleUrlChange.bind(this);
+            // 保存监听器引用以便清理
+            this._handleStateChange = this.handleUrlChange.bind(this);
 
             // 使用 History API 监听
             const originalPushState = history.pushState;
-            const self = this;
             history.pushState = function() {
                 originalPushState.apply(this, arguments);
-                handleStateChange();
-            };
+                this._handleStateChange();
+            }.bind(this);
 
             const originalReplaceState = history.replaceState;
             history.replaceState = function() {
                 originalReplaceState.apply(this, arguments);
-                handleStateChange();
-            };
-            
-            window.addEventListener('popstate', handleStateChange);
+                this._handleStateChange();
+            }.bind(this);
+
+            window.addEventListener('popstate', this._handleStateChange);
         }
 
 
