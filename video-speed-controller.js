@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.5.2
+// @version      1.5.3
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
 // @author       ternece
@@ -1022,37 +1022,195 @@
         }
 
         createVideoControlButton(video, index) {
-            const button = document.createElement('div');
-            Object.assign(button.style, {
-                position: 'absolute', top: '10px', left: '10px',
-                backgroundColor: 'rgba(0, 0, 0, 0.6)', color: 'white',
-                padding: '5px 10px', borderRadius: '4px', fontSize: '12px',
-                fontFamily: 'Arial, sans-serif', cursor: 'pointer', zIndex: '9999',
-                transition: 'background-color 0.3s', userSelect: 'none'
-            });
-            
-            // 安全加固：使用 textContent 替代 innerHTML
-            const textSpan = document.createElement('span');
-            textSpan.textContent = `视频 ${index}`;
-            button.appendChild(textSpan);
-
-            if (!this.activeVideo) {
-                this.activeVideo = video;
-                button.style.backgroundColor = 'rgba(0, 128, 255, 0.8)';
+            // 检查是否已存在按钮，避免重复创建
+            if (this.videoControlButtons.has(video)) {
+                return;
             }
 
-            button.addEventListener('click', () => {
-                this.videoControlButtons.forEach(btn => btn.style.backgroundColor = 'rgba(0, 0, 0, 0.6)');
-                this.activeVideo = video;
-                button.style.backgroundColor = 'rgba(0, 128, 255, 0.8)';
-                showFloatingMessage(`已切换到视频 ${index} 控制`);
+            // 创建圆形标签（24px，纯圆形无文字设计）
+            const button = document.createElement('div');
+            Object.assign(button.style, {
+                position: 'absolute',
+                top: '10px',
+                left: '10px',
+                width: '24px',
+                height: '24px',
+                borderRadius: '50%',
+                background: 'rgba(255, 255, 255, 0.15)',
+                border: '1px solid rgba(255, 255, 255, 0.3)',
+                color: 'white',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+                userSelect: 'none',
+                zIndex: '9999'
             });
 
+            // 悬停效果
+            button.addEventListener('mouseenter', (e) => {
+                // 如果已激活，不显示提示
+                if (button.classList.contains('active')) {
+                    return;
+                }
+
+                // 悬停时放大
+                button.style.transform = 'scale(1.3)';
+                button.style.background = 'rgba(255, 255, 255, 0.25)';
+                button.style.borderColor = 'rgba(255, 255, 255, 0.5)';
+
+                // 显示 tooltip
+                this.showTooltip(button, '选择视频');
+            });
+
+            button.addEventListener('mouseleave', () => {
+                if (!button.classList.contains('active')) {
+                    button.style.transform = 'scale(1)';
+                    button.style.background = 'rgba(255, 255, 255, 0.15)';
+                    button.style.borderColor = 'rgba(255, 255, 255, 0.3)';
+                }
+            });
+
+            // 点击切换事件
+            button.addEventListener('click', (e) => {
+                e.stopPropagation(); // 防止触发视频播放
+                this.switchActiveVideo(video, button);
+            });
+
+            // 如果是当前活动视频，设为激活状态
+            if (!this.activeVideo) {
+                this.activeVideo = video;
+                this.setActiveButton(button);
+            } else if (video === this.activeVideo) {
+                this.setActiveButton(button);
+            }
+
+            // 获取父容器
             const container = video.parentElement || document.body;
-            const style = window.getComputedStyle(container);
-            if (style.position === 'static') container.style.position = 'relative';
+            const computedStyle = window.getComputedStyle(container);
+            if (computedStyle.position === 'static') {
+                container.style.position = 'relative';
+            }
+
+            // 添加到DOM
             container.appendChild(button);
             this.videoControlButtons.set(video, button);
+        }
+
+        /**
+         * 显示 tooltip 提示
+         * @param {HTMLElement} target 目标元素
+         * @param {string} text 提示文字
+         */
+        showTooltip(target, text) {
+            const tooltip = document.createElement('div');
+            Object.assign(tooltip.style, {
+                position: 'fixed',
+                background: 'rgba(0, 0, 0, 0.9)',
+                color: 'white',
+                padding: '4px 8px',
+                borderRadius: '4px',
+                fontSize: '10px',
+                whiteSpace: 'nowrap',
+                pointerEvents: 'none',
+                zIndex: '10000',
+                opacity: '0',
+                transition: 'opacity 0.2s ease',
+                fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif'
+            });
+            tooltip.textContent = text;
+
+            // 定位 tooltip
+            document.body.appendChild(tooltip);
+            const rect = target.getBoundingClientRect();
+
+            // 计算位置
+            let tooltipLeft = rect.left + (rect.width / 2) - (tooltip.offsetWidth / 2);
+            let tooltipTop = rect.top - tooltip.offsetHeight - 8;
+
+            // 边界检测
+            if (tooltipLeft < 10) {
+                tooltipLeft = 10;
+            }
+            if (tooltipLeft + tooltip.offsetWidth > window.innerWidth - 10) {
+                tooltipLeft = window.innerWidth - tooltip.offsetWidth - 10;
+            }
+            if (tooltipTop < 10) {
+                tooltipTop = rect.bottom + 8;
+            }
+
+            tooltip.style.left = tooltipLeft + 'px';
+            tooltip.style.top = tooltipTop + 'px';
+
+            // 显示
+            setTimeout(() => tooltip.style.opacity = '1', 10);
+
+            // 3秒后自动消失
+            setTimeout(() => {
+                tooltip.style.opacity = '0';
+                setTimeout(() => tooltip.remove(), 200);
+            }, 3000);
+        }
+
+        /**
+         * 切换活动视频
+         * @param {HTMLVideoElement} video 目标视频元素
+         * @param {HTMLElement} button 按钮元素
+         */
+        switchActiveVideo(video, button) {
+            // 重置所有按钮样式
+            this.videoControlButtons.forEach((btn) => {
+                this.resetButtonStyle(btn);
+            });
+
+            // 激活当前按钮
+            this.setActiveButton(button);
+
+            // 切换活动视频
+            this.activeVideo = video;
+
+            // 显示提示消息
+            showFloatingMessage('已切换到该视频控制');
+        }
+
+        /**
+         * 设置按钮为激活状态
+         * @param {HTMLElement} button 按钮元素
+         */
+        setActiveButton(button) {
+            button.classList.add('active');
+            button.style.background = 'rgba(0, 128, 255, 0.3)';
+            button.style.borderColor = 'rgba(0, 128, 255, 0.3)';
+            button.style.boxShadow = '0 0 8px rgba(0, 128, 255, 0.3)';
+            button.style.transform = 'scale(1)';
+
+            // 添加中心小点指示器
+            const dot = document.createElement('div');
+            Object.assign(dot.style, {
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -50%)',
+                width: '4px',
+                height: '4px',
+                background: 'rgba(255, 255, 255, 0.5)',
+                borderRadius: '50%',
+                pointerEvents: 'none'
+            });
+            button.appendChild(dot);
+        }
+
+        /**
+         * 重置按钮为默认状态
+         * @param {HTMLElement} button 按钮元素
+         */
+        resetButtonStyle(button) {
+            button.classList.remove('active');
+            button.style.background = 'rgba(255, 255, 255, 0.15)';
+            button.style.borderColor = 'rgba(255, 255, 255, 0.3)';
+            button.style.boxShadow = 'none';
+            button.style.transform = 'scale(1)';
+            // 移除中心小点
+            const dot = button.querySelector('div');
+            if (dot) dot.remove();
         }
 
         // 8. 按键事件处理
