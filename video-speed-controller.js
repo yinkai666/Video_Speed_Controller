@@ -590,6 +590,16 @@
         }
 
         shouldEnableScript() {
+            // 如果在 iframe 中，检查是否有视频
+            if (window.self !== window.top) {
+                const hasVideo = document.querySelector('video') !== null;
+                if (hasVideo) {
+                    console.log('✅ iframe 中检测到视频，启用脚本');
+                    return true;
+                }
+                return false;
+            }
+
             if (this.currentDomain.includes('youtube.com') ||
                 (this.currentDomain.includes('bilibili.com') && window.location.pathname.includes('/video/'))) {
                 return true;
@@ -805,10 +815,36 @@
         cleanup() {
             if (this.keydownListener) {
                 window.removeEventListener("keydown", this.keydownListener, true);
+
+                // 清理 iframe 内的监听器
+                if (this.activeVideo) {
+                    try {
+                        const iframeWindow = this.activeVideo.ownerDocument.defaultView;
+                        if (iframeWindow && iframeWindow !== window) {
+                            iframeWindow.removeEventListener("keydown", this.keydownListener, true);
+                        }
+                    } catch(e) {
+                        // iframe 可能已被销毁，忽略错误
+                    }
+                }
+
                 this.keydownListener = null;
             }
             if (this.keyupListener) {
                 window.removeEventListener("keyup", this.keyupListener, true);
+
+                // 清理 iframe 内的监听器
+                if (this.activeVideo) {
+                    try {
+                        const iframeWindow = this.activeVideo.ownerDocument.defaultView;
+                        if (iframeWindow && iframeWindow !== window) {
+                            iframeWindow.removeEventListener("keyup", this.keyupListener, true);
+                        }
+                    } catch(e) {
+                        // iframe 可能已被销毁，忽略错误
+                    }
+                }
+
                 this.keyupListener = null;
             }
             this.activeObservers.forEach(observer => observer.disconnect());
@@ -855,6 +891,20 @@
             this.keyupListener = this.handleKeyUp.bind(this);
             window.addEventListener("keydown", this.keydownListener, true);
             window.addEventListener("keyup", this.keyupListener, true);
+
+            // 如果视频在 iframe 中，也在 iframe 内设置监听
+            if (this.activeVideo) {
+                try {
+                    const iframeWindow = this.activeVideo.ownerDocument.defaultView;
+                    if (iframeWindow && iframeWindow !== window) {
+                        iframeWindow.addEventListener("keydown", this.keydownListener, true);
+                        iframeWindow.addEventListener("keyup", this.keyupListener, true);
+                        console.log('✅ 已在 iframe 中设置键盘监听');
+                    }
+                } catch(e) {
+                    console.warn('⚠️ 无法在 iframe 中设置监听器:', e.message);
+                }
+            }
         }
 
         // 7. 视频查找与设置
