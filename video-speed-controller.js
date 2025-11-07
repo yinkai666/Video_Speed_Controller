@@ -2,17 +2,19 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.2.5
-// @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复1.0倍速。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站（可通过修改脚本的 @match 规则扩展支持的网站）。
-// @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore 1.0x speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports YouTube, Bilibili and most video websites (extendable by modifying the @match rule).
+// @version      1.5.3
+// @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
+// @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
 // @author       ternece
 // @license      MIT
 // @match        *://*.youtube.com/*
 // @match        *://*.bilibili.com/video/*
+// @match        *://*/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=greasyfork.org
 // @grant        GM_registerMenuCommand
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_notification
 // @downloadURL https://update.greasyfork.org/scripts/525065/%E8%A7%86%E9%A2%91%E5%80%8D%E9%80%9F%E6%92%AD%E6%94%BE%E5%A2%9E%E5%BC%BA%E7%89%88.user.js
 // @updateURL https://update.greasyfork.org/scripts/525065/%E8%A7%86%E9%A2%91%E5%80%8D%E9%80%9F%E6%92%AD%E6%94%BE%E5%A2%9E%E5%BC%BA%E7%89%88.meta.js
 // ==/UserScript==
@@ -28,181 +30,53 @@
         targetRateStep: 0.5  // 按 +/- 键调整目标倍速的步长
     };
 
-    // 获取保存的设置或使用默认值
-    let settings = {
-        defaultRate: GM_getValue('defaultRate', DEFAULT_SETTINGS.defaultRate),
-        targetRate: GM_getValue('targetRate', DEFAULT_SETTINGS.targetRate),
-        quickRateStep: GM_getValue('quickRateStep', DEFAULT_SETTINGS.quickRateStep),
-        targetRateStep: GM_getValue('targetRateStep', DEFAULT_SETTINGS.targetRateStep)
+    // 通用配置
+    const CONFIG = {
+        SEEK_STEP_SECONDS: 5,           // 快进/快退的秒数
+        VOLUME_STEP: 0.1,               // 音量调整步长
+        DEFAULT_FPS: 30,                // 默认视频帧率 (用于逐帧操作)
+        SHORT_PRESS_MAX_COUNT: 3,       // 短按判断的按键计数阈值
+
+        // 超时与延迟
+        INIT_RETRY_DELAY: 5000,         // 初始化重试延迟
+        URL_CHANGE_INIT_DELAY: 1000,    // URL 变化后初始化延迟
+        WAIT_FOR_VIDEO_TIMEOUT: 10000,  // 等待视频元素超时时间
+
+        // 数值限制
+        MAX_RATE: 16,                   // 最大允许的播放速度
+        MAX_QUICK_RATE_STEP: 3          // “快速调速步长”的最大值
     };
 
-    // 注册菜单命令
-    GM_registerMenuCommand('设置默认播放速度', () => {
-        const newRate = prompt('请输入默认播放速度 (0.1-16)，视频加载时将使用此速度:', settings.defaultRate);
-        if (newRate !== null) {
-            const rate = parseFloat(newRate);
-            if (!isNaN(rate) && rate >= 0.1 && rate <= 16) {
-                settings.defaultRate = rate;
-                GM_setValue('defaultRate', rate);
-                showFloatingMessage(`默认播放速度已设置为 ${rate}x`);
-                // 立即应用新的默认速度
-                const video = document.querySelector('video');
-                if (video) {
-                    video.playbackRate = rate;
-                }
-            } else {
-                alert('请输入有效的速度值（0.1-16）');
-            }
+    // 特定网站的配置
+    const SITE_SPECIFIC_CONFIG = {
+        'youtube.com': {
+            mainVideoSelector: '.html5-main-video',
+            fullscreenButtonSelector: '.ytp-fullscreen-button'
+        },
+        'bilibili.com': {
+            // 宽度大于400px通常是主播放器
+            mainVideoPredicate: video => video.getBoundingClientRect().width > 400,
+            // 新版 '.bpx-player-ctrl-full', 旧版 '.bilibili-player-video-btn-fullscreen'
+            fullscreenButtonSelector: '.bpx-player-ctrl-full, .bilibili-player-video-btn-fullscreen'
         }
-    });
+    };
 
-    GM_registerMenuCommand('设置长按右键倍速', () => {
-        const newRate = prompt('请输入长按右键时的倍速 (0.1-16):', settings.targetRate);
-        if (newRate !== null) {
-            const rate = parseFloat(newRate);
-            if (!isNaN(rate) && rate >= 0.1 && rate <= 16) {
-                settings.targetRate = rate;
-                GM_setValue('targetRate', rate);
-                showFloatingMessage(`长按右键倍速已设置为 ${rate}x`);
-            } else {
-                alert('请输入有效的速度值（0.1-16）');
-            }
+    // 显示通知 (保留在外部，因为它依赖 GM_notification)
+    function showNotification(message) {
+        if (typeof GM_notification !== 'undefined') {
+            GM_notification({
+                text: message,
+                title: '视频倍速控制器',
+                timeout: 3000
+            });
+        } else {
+            // 如果 GM_notification 不可用，则使用浮动消息作为备用
+            showFloatingMessage(message);
         }
-    });
-
-    GM_registerMenuCommand('设置快速调速步长', () => {
-        const newStep = prompt('请输入按 [ 或 ] 键调整速度的步长 (0.1-3):', settings.quickRateStep);
-        if (newStep !== null) {
-            const step = parseFloat(newStep);
-            if (!isNaN(step) && step >= 0.1 && step <= 3) {
-                settings.quickRateStep = step;
-                GM_setValue('quickRateStep', step);
-                showFloatingMessage(`快速调速步长已设置为 ${step}`);
-            } else {
-                alert('请输入有效的步长值（0.1-3）');
-            }
-        }
-    });
-
-    GM_registerMenuCommand('设置目标倍速调整步长', () => {
-        const newStep = prompt('请输入按 +/- 键调整目标倍速的步长 (0.1-16):', settings.targetRateStep);
-        if (newStep !== null) {
-            const step = parseFloat(newStep);
-            if (!isNaN(step) && step >= 0.1 && step <= 16) {
-                settings.targetRateStep = step;
-                GM_setValue('targetRateStep', step);
-                showFloatingMessage(`目标倍速调整步长已设置为 ${step}`);
-            } else {
-                alert('请输入有效的步长值（0.1-16）');
-            }
-        }
-    });
-
-    let currentUrl = location.href;
-    let videoObserver = null;
-    let keydownListener = null;
-    let keyupListener = null;
-    let urlObserver = null;
-    let videoChangeObserver = null;
-    let activeObservers = new Set();
-
-    // 完整的清理函数
-    function cleanup() {
-        // 清理所有事件监听器
-        if (keydownListener) {
-            document.removeEventListener("keydown", keydownListener, true);
-            keydownListener = null;
-        }
-        if (keyupListener) {
-            document.removeEventListener("keyup", keyupListener, true);
-            keyupListener = null;
-        }
-
-        // 清理所有观察器
-        activeObservers.forEach(observer => {
-            if (observer && observer.disconnect) {
-                observer.disconnect();
-            }
-        });
-        activeObservers.clear();
-
-        videoObserver = null;
-        urlObserver = null;
-        videoChangeObserver = null;
     }
 
-    // 等待视频元素加载
-    function waitForVideoElement() {
-        return new Promise((resolve, reject) => {
-            const maxAttempts = 10;
-            let attempts = 0;
-
-            const checkVideo = () => {
-                // 添加对 YouTube 播放器的特殊处理
-                if (location.hostname.includes('youtube.com')) {
-                    // 尝试多个可能的选择器
-                    const youtubeVideo = document.querySelector('.html5-main-video') || 
-                                      document.querySelector('video.video-stream') ||
-                                      document.querySelector('.html5-video-player video');
-                    if (youtubeVideo && youtubeVideo.readyState >= 1) {
-                        console.log('找到YouTube视频元素:', youtubeVideo);
-                        // 设置默认播放速度
-                        youtubeVideo.playbackRate = settings.defaultRate;
-                        return youtubeVideo;
-                    }
-                    console.log('YouTube视频元素未就绪');
-                    return null;
-                } else {
-                    const video = document.querySelector("video");
-                    if (video && video.readyState >= 1) {
-                        // 设置默认播放速度
-                        video.playbackRate = settings.defaultRate;
-                        return video;
-                    }
-                }
-                return null;
-            };
-
-            // 立即检查
-            const video = checkVideo();
-            if (video) {
-                resolve(video);
-                return;
-            }
-
-            // 创建观察器
-            const observer = new MutationObserver(() => {
-                attempts++;
-                const video = checkVideo();
-                if (video) {
-                    observer.disconnect();
-                    resolve(video);
-                } else if (attempts >= maxAttempts) {
-                    observer.disconnect();
-                    console.warn("未找到视频元素，脚本已停止运行");
-                    reject({ type: "no_video" }); // 使用对象替代 Error
-                }
-            });
-
-            observer.observe(document.body, {
-                childList: true,
-                subtree: true,
-            });
-            activeObservers.add(observer);
-
-            // 设置超时
-            setTimeout(() => {
-                observer.disconnect();
-                activeObservers.delete(observer);
-                console.warn("等待视频元素超时，脚本已停止运行");
-                reject({ type: "timeout" }); // 使用对象替代 Error
-            }, 10000);
-        });
-    }
-
-    // 显示浮动提示
+    // 显示浮动提示 (保留在外部，因为它是一个独立的UI工具函数)
     function showFloatingMessage(message) {
-        // 创建提示元素
         const messageElement = document.createElement("div");
         messageElement.textContent = message;
         messageElement.style.position = "fixed";
@@ -217,327 +91,1242 @@
         messageElement.style.fontFamily = "Arial, sans-serif";
         messageElement.style.fontSize = "14px";
         messageElement.style.transition = "opacity 0.5s ease-out";
-
-        // 添加到页面
         document.body.appendChild(messageElement);
-
-        // 几秒后消失
         setTimeout(() => {
             messageElement.style.opacity = "0";
             setTimeout(() => {
                 document.body.removeChild(messageElement);
-            }, 500); // 等待透明度过渡完成
-        }, 2000); // 2秒后消失
+            }, 500);
+        }, 2000);
     }
 
-    // 初始化脚本
-    async function init() {
-        cleanup();
+    // 显示域名管理弹窗（分层级）
+    function showDomainManager(groups, controller) {
+        // 如果在iframe中运行，不显示弹窗（避免与主页面重复）
+        if (window.self !== window.top) {
+            showFloatingMessage('此功能仅在主页面可用');
+            return;
+        }
 
-        try {
-            const video = await waitForVideoElement();
-            console.log("找到视频元素：", video);
+        // 创建遮罩层
+        const overlay = document.createElement("div");
+        overlay.style.position = "fixed";
+        overlay.style.top = "0";
+        overlay.style.left = "0";
+        overlay.style.width = "100%";
+        overlay.style.height = "100%";
+        overlay.style.backgroundColor = "rgba(0, 0, 0, 0.5)";
+        overlay.style.zIndex = "10001";
+        overlay.style.display = "flex";
+        overlay.style.justifyContent = "center";
+        overlay.style.alignItems = "center";
 
-            const key = "ArrowRight"; // 监听的按键
-            const increaseKey = "Equal"; // + 键
-            const decreaseKey = "Minus"; // - 键
-            const quickIncreaseKey = "BracketRight"; // 】键
-            const quickDecreaseKey = "BracketLeft"; // 【键
-            const resetSpeedKey = "KeyP"; // P键
-            let targetRate = settings.targetRate; // 目标倍速
-            let currentQuickRate = 1.0; // 当前快速倍速
-            let downCount = 0; // 按键按下计数器
-            let originalRate = video.playbackRate; // 保存原始播放速度
+        // 创建弹窗容器
+        const modal = document.createElement("div");
+        modal.style.backgroundColor = "white";
+        modal.style.borderRadius = "8px";
+        modal.style.padding = "0";
+        modal.style.maxWidth = "700px";
+        modal.style.width = "90%";
+        modal.style.maxHeight = "80vh";
+        modal.style.boxShadow = "0 4px 20px rgba(0, 0, 0, 0.3)";
+        modal.style.display = "flex";
+        modal.style.flexDirection = "column";
 
-            // 监听视频元素变化
-            if (video.parentElement) {
-                videoChangeObserver = new MutationObserver((mutations) => {
-                    const hasVideoChanges = mutations.some(mutation =>
-                        Array.from(mutation.removedNodes).some(node => node.tagName === 'VIDEO') ||
-                        Array.from(mutation.addedNodes).some(node => node.tagName === 'VIDEO')
-                    );
+        // 创建弹窗头部
+        const header = document.createElement("div");
+        header.style.padding = "20px";
+        header.style.borderBottom = "1px solid #eee";
+        header.style.display = "flex";
+        header.style.justifyContent = "space-between";
+        header.style.alignItems = "center";
+        header.style.backgroundColor = "#f8f9fa";
+        header.style.borderTopLeftRadius = "8px";
+        header.style.borderTopRightRadius = "8px";
 
-                    if (hasVideoChanges) {
-                        console.log("视频元素变化，重新初始化");
-                        cleanup();
-                        init().catch(console.error);
+        const title = document.createElement("h2");
+        title.textContent = `已启用的网站 (${groups.length})`;
+        title.style.margin = "0";
+        title.style.fontSize = "18px";
+        title.style.fontWeight = "600";
+        title.style.color = "#333";
+
+        const buttonContainer = document.createElement("div");
+        buttonContainer.style.display = "flex";
+        buttonContainer.style.gap = "10px";
+
+        // 一键清空按钮
+        const clearAllBtn = document.createElement("button");
+        clearAllBtn.textContent = "清空所有";
+        clearAllBtn.style.padding = "8px 16px";
+        clearAllBtn.style.backgroundColor = "#dc3545";
+        clearAllBtn.style.color = "white";
+        clearAllBtn.style.border = "none";
+        clearAllBtn.style.borderRadius = "4px";
+        clearAllBtn.style.cursor = "pointer";
+        clearAllBtn.style.fontSize = "14px";
+        clearAllBtn.style.fontWeight = "500";
+        clearAllBtn.onmouseover = () => {
+            clearAllBtn.style.backgroundColor = "#c82333";
+        };
+        clearAllBtn.onmouseout = () => {
+            clearAllBtn.style.backgroundColor = "#dc3545";
+        };
+        clearAllBtn.onclick = () => {
+            if (confirm("确定要清空所有临时启用的网站吗？\n\n注意：YouTube 和 Bilibili 不会受影响")) {
+                controller.tempEnabledDomainGroups = [];
+                controller.tempEnabledDomains = [];
+                GM_setValue('tempEnabledDomainGroups', controller.tempEnabledDomainGroups);
+                GM_setValue('tempEnabledDomains', controller.tempEnabledDomains);
+                document.body.removeChild(overlay);
+                showNotification("✅ 已清空临时启用列表\n请刷新页面");
+            }
+        };
+
+        // 关闭按钮
+        const closeBtn = document.createElement("button");
+        closeBtn.textContent = "×";
+        closeBtn.style.padding = "8px 12px";
+        closeBtn.style.backgroundColor = "transparent";
+        closeBtn.style.color = "#666";
+        closeBtn.style.border = "none";
+        closeBtn.style.borderRadius = "4px";
+        closeBtn.style.cursor = "pointer";
+        closeBtn.style.fontSize = "24px";
+        closeBtn.style.fontWeight = "300";
+        closeBtn.style.lineHeight = "1";
+        closeBtn.onmouseover = () => {
+            closeBtn.style.backgroundColor = "#e9ecef";
+        };
+        closeBtn.onmouseout = () => {
+            closeBtn.style.backgroundColor = "transparent";
+        };
+        closeBtn.onclick = () => {
+            document.body.removeChild(overlay);
+        };
+
+        buttonContainer.appendChild(clearAllBtn);
+        buttonContainer.appendChild(closeBtn);
+        header.appendChild(title);
+        header.appendChild(buttonContainer);
+
+        // 创建内容区域
+        const content = document.createElement("div");
+        content.style.padding = "20px";
+        content.style.overflowY = "auto";
+        content.style.flex = "1";
+
+        if (groups.length === 0) {
+            const emptyMsg = document.createElement("div");
+            emptyMsg.textContent = "当前没有临时启用的网站";
+            emptyMsg.style.textAlign = "center";
+            emptyMsg.style.color = "#999";
+            emptyMsg.style.padding = "40px 0";
+            emptyMsg.style.fontSize = "16px";
+            content.appendChild(emptyMsg);
+        } else {
+            const groupsList = document.createElement("div");
+            groupsList.style.display = "flex";
+            groupsList.style.flexDirection = "column";
+            groupsList.style.gap = "15px";
+
+            groups.forEach((group, groupIndex) => {
+                // 创建主分组容器
+                const groupContainer = document.createElement("div");
+                groupContainer.style.border = "2px solid #dee2e6";
+                groupContainer.style.borderRadius = "8px";
+                groupContainer.style.overflow = "hidden";
+
+                // 主域名行
+                const mainDomainRow = document.createElement("div");
+                mainDomainRow.style.display = "flex";
+                mainDomainRow.style.justifyContent = "space-between";
+                mainDomainRow.style.alignItems = "center";
+                mainDomainRow.style.padding = "15px";
+                mainDomainRow.style.backgroundColor = "#e7f3ff";
+                mainDomainRow.style.borderBottom = group.iframes.length > 0 ? "1px solid #dee2e6" : "none";
+
+                // 展开/折叠按钮
+                const expandBtn = document.createElement("button");
+                expandBtn.textContent = group.iframes.length > 0 ? (group.expanded ? '▼' : '▶') : '•';
+                expandBtn.style.padding = "4px 8px";
+                expandBtn.style.backgroundColor = "transparent";
+                expandBtn.style.color = "#0066cc";
+                expandBtn.style.border = "none";
+                expandBtn.style.borderRadius = "4px";
+                expandBtn.style.cursor = group.iframes.length > 0 ? "pointer" : "default";
+                expandBtn.style.fontSize = "14px";
+                expandBtn.style.fontWeight = "bold";
+                expandBtn.disabled = group.iframes.length === 0;
+                expandBtn.onclick = () => {
+                    group.expanded = !group.expanded;
+                    document.body.removeChild(overlay);
+                    showDomainManager(groups, controller);
+                };
+
+                // 主域名
+                const mainDomainSpan = document.createElement("span");
+                mainDomainSpan.textContent = `${groupIndex + 1}. ${group.mainDomain}`;
+                mainDomainSpan.style.fontFamily = "Monaco, Consolas, monospace";
+                mainDomainSpan.style.fontSize = "15px";
+                mainDomainSpan.style.fontWeight = "600";
+                mainDomainSpan.style.color = "#0066cc";
+                mainDomainSpan.style.flex = "1";
+                mainDomainSpan.style.marginLeft = "10px";
+
+                // 删除分组按钮
+                const deleteGroupBtn = document.createElement("button");
+                deleteGroupBtn.textContent = "删除整个分组";
+                deleteGroupBtn.style.padding = "6px 12px";
+                deleteGroupBtn.style.backgroundColor = "#dc3545";
+                deleteGroupBtn.style.color = "white";
+                deleteGroupBtn.style.border = "none";
+                deleteGroupBtn.style.borderRadius = "4px";
+                deleteGroupBtn.style.cursor = "pointer";
+                deleteGroupBtn.style.fontSize = "13px";
+                deleteGroupBtn.onmouseover = () => {
+                    deleteGroupBtn.style.backgroundColor = "#c82333";
+                };
+                deleteGroupBtn.onmouseout = () => {
+                    deleteGroupBtn.style.backgroundColor = "#dc3545";
+                };
+                deleteGroupBtn.onclick = () => {
+                    if (confirm(`确定要删除分组 "${group.mainDomain}" 及其所有iframe域名吗？`)) {
+                        controller.deleteDomainGroup(group.mainDomain);
+                        document.body.removeChild(overlay);
+                        showNotification(`已删除分组：${group.mainDomain}，请刷新页面`);
                     }
-                });
+                };
 
-                videoChangeObserver.observe(video.parentElement, {
-                    childList: true,
-                    subtree: true
-                });
-                activeObservers.add(videoChangeObserver);
+                mainDomainRow.appendChild(expandBtn);
+                mainDomainRow.appendChild(mainDomainSpan);
+                mainDomainRow.appendChild(deleteGroupBtn);
+
+                groupContainer.appendChild(mainDomainRow);
+
+                // iframe域名列表
+                if (group.expanded && group.iframes.length > 0) {
+                    const iframesContainer = document.createElement("div");
+                    iframesContainer.style.backgroundColor = "#f8f9fa";
+                    iframesContainer.style.padding = "10px 20px";
+
+                    const iframesList = document.createElement("div");
+                    iframesList.style.display = "flex";
+                    iframesList.style.flexDirection = "column";
+                    iframesList.style.gap = "8px";
+
+                    group.iframes.forEach((iframeDomain, iframeIndex) => {
+                        const iframeRow = document.createElement("div");
+                        iframeRow.style.display = "flex";
+                        iframeRow.style.justifyContent = "space-between";
+                        iframeRow.style.alignItems = "center";
+                        iframeRow.style.padding = "8px 12px";
+                        iframeRow.style.backgroundColor = "white";
+                        iframeRow.style.borderRadius = "4px";
+                        iframeRow.style.border = "1px solid #dee2e6";
+
+                        const indent = document.createElement("span");
+                        indent.textContent = "  └─ ";
+                        indent.style.color = "#666";
+                        indent.style.fontSize = "14px";
+
+                        const iframeDomainSpan = document.createElement("span");
+                        iframeDomainSpan.textContent = iframeDomain;
+                        iframeDomainSpan.style.fontFamily = "Monaco, Consolas, monospace";
+                        iframeDomainSpan.style.fontSize = "14px";
+                        iframeDomainSpan.style.color = "#333";
+                        iframeDomainSpan.style.flex = "1";
+
+                        const deleteIframeBtn = document.createElement("button");
+                        deleteIframeBtn.textContent = "删除";
+                        deleteIframeBtn.style.padding = "4px 10px";
+                        deleteIframeBtn.style.backgroundColor = "#ff6b6b";
+                        deleteIframeBtn.style.color = "white";
+                        deleteIframeBtn.style.border = "none";
+                        deleteIframeBtn.style.borderRadius = "4px";
+                        deleteIframeBtn.style.cursor = "pointer";
+                        deleteIframeBtn.style.fontSize = "12px";
+                        deleteIframeBtn.onmouseover = () => {
+                            deleteIframeBtn.style.backgroundColor = "#ee5a5a";
+                        };
+                        deleteIframeBtn.onmouseout = () => {
+                            deleteIframeBtn.style.backgroundColor = "#ff6b6b";
+                        };
+                        deleteIframeBtn.onclick = () => {
+                            controller.removeIframeFromGroup(group.mainDomain, iframeDomain);
+                            document.body.removeChild(overlay);
+                            showNotification(`已从分组中删除：${iframeDomain}，请刷新页面`);
+                        };
+
+                        iframeRow.appendChild(indent);
+                        iframeRow.appendChild(iframeDomainSpan);
+                        iframeRow.appendChild(deleteIframeBtn);
+                        iframesList.appendChild(iframeRow);
+                    });
+
+                    iframesContainer.appendChild(iframesList);
+                    groupContainer.appendChild(iframesContainer);
+                }
+
+                groupsList.appendChild(groupContainer);
+            });
+
+            content.appendChild(groupsList);
+        }
+
+        modal.appendChild(header);
+        modal.appendChild(content);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+
+        // 点击遮罩层关闭
+        overlay.addEventListener("click", (e) => {
+            if (e.target === overlay) {
+                document.body.removeChild(overlay);
+            }
+        });
+    }
+
+    // 通用防抖函数
+    function debounce(func, wait) {
+        let timeout;
+        return function executedFunction(...args) {
+            const later = () => {
+                clearTimeout(timeout);
+                func.apply(this, args);
+            };
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+        };
+    }
+
+    class VideoController {
+        constructor() {
+            // 调试开关
+            this.DEBUG = false;
+            // 长按判定时间（毫秒）
+            this.LONG_PRESS_DELAY = 200; // 长按判定时间（毫秒）
+
+            // 从全局加载配置
+            this.config = CONFIG;
+            
+            // 获取当前网站的特定配置
+            this.siteConfig = {};
+            for (const domain in SITE_SPECIFIC_CONFIG) {
+                if (window.location.hostname.includes(domain)) {
+                    this.siteConfig = SITE_SPECIFIC_CONFIG[domain];
+                    break;
+                }
             }
 
-            // 创建新的事件监听器
-            keydownListener = (e) => {
-                // 只处理我们关心的按键
-                const validKeys = ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'Enter', 'Equal', 'Minus', 'BracketRight', 'BracketLeft', 'KeyP', 'Comma', 'Period'];
-                if (!validKeys.includes(e.code)) {
+            // 1. 状态 (State)
+            this.settings = {
+                defaultRate: GM_getValue('defaultRate', DEFAULT_SETTINGS.defaultRate),
+                targetRate: GM_getValue('targetRate', DEFAULT_SETTINGS.targetRate),
+                quickRateStep: GM_getValue('quickRateStep', DEFAULT_SETTINGS.quickRateStep),
+                targetRateStep: GM_getValue('targetRateStep', DEFAULT_SETTINGS.targetRateStep)
+            };
+            // 使用分组数据结构：主域名 -> 包含的iframe域名
+            this.tempEnabledDomainGroups = GM_getValue('tempEnabledDomainGroups', []);
+            this.tempEnabledDomains = GM_getValue('tempEnabledDomains', []); // 保留兼容
+            this.currentDomain = window.location.hostname;
+            this.currentUrl = location.href;
+            this.lastManualRateChangeTime = 0;
+            this.activeVideo = null;
+            this.videoControlButtons = new Map();
+            this.rightKeyTimer = null;
+            this.downCount = 0;
+            this.originalRate = 1.0;
+            this.targetRate = this.settings.targetRate;
+            this.currentQuickRate = 1.0;
+            this.keyHandlers = {};
+
+            // 监听器和观察器引用
+            this.keydownListener = null;
+            this.keyupListener = null;
+            this.mainObserver = null; // 合并后的主观察器
+            this.videoChangeObserver = null;
+            this.activeObservers = new Set();
+
+            // 创建防抖版的视频检测函数
+            this.debouncedDetectAndSetupVideos = debounce(this.detectAndSetupVideos.bind(this), 500);
+
+            this._initializeKeyHandlers();
+        }
+
+        /**
+         * 检测并返回所有跨域 iframe 的域名
+         * @returns {Array<string>} 域名数组
+         */
+        detectCrossOriginIframeDomains() {
+            const crossDomainIframes = new Set();
+            const iframes = document.querySelectorAll('iframe');
+
+            iframes.forEach(iframe => {
+                try {
+                    const src = iframe.src;
+                    if (!src) return; // 跳过没有 src 的 iframe
+
+                    const url = new URL(src);
+                    const domain = url.hostname;
+
+                    // 如果不是当前域名，添加到列表
+                    if (domain !== this.currentDomain) {
+                        crossDomainIframes.add(domain);
+                    }
+                } catch (e) {
+                    // 忽略无效的 src（如 javascript: 协议）
+                    console.warn('检测到无效的 iframe src:', iframe.src);
+                }
+            });
+
+            return Array.from(crossDomainIframes);
+        }
+
+        /**
+         * 批量启用域名到临时列表
+         * @param {Array<string>} domains 域名数组
+         * @returns {Array<string>} 新添加的域名数组
+         */
+        enableDomainsInTempList(domains) {
+            const newlyEnabled = [];
+
+            domains.forEach(domain => {
+                if (!this.tempEnabledDomains.includes(domain)) {
+                    this.tempEnabledDomains.push(domain);
+                    newlyEnabled.push(domain);
+                }
+            });
+
+            if (newlyEnabled.length > 0) {
+                GM_setValue('tempEnabledDomains', this.tempEnabledDomains);
+            }
+
+            return newlyEnabled;
+        }
+
+        /**
+         * 创建或更新域名分组
+         * @param {string} mainDomain 主域名
+         * @param {Array<string>} iframeDomains iframe域名数组
+         */
+        saveDomainGroup(mainDomain, iframeDomains) {
+            // 查找是否已存在该主域名的分组
+            const existingIndex = this.tempEnabledDomainGroups.findIndex(g => g.mainDomain === mainDomain);
+
+            if (existingIndex >= 0) {
+                // 更新现有分组
+                const existingGroup = this.tempEnabledDomainGroups[existingIndex];
+                // 合并iframe域名（去重）
+                const combinedIframes = [...new Set([...existingGroup.iframes, ...iframeDomains])];
+                this.tempEnabledDomainGroups[existingIndex] = {
+                    mainDomain,
+                    iframes: combinedIframes,
+                    createdAt: existingGroup.createdAt,
+                    updatedAt: Date.now()
+                };
+            } else {
+                // 创建新分组
+                this.tempEnabledDomainGroups.push({
+                    mainDomain,
+                    iframes: iframeDomains,
+                    createdAt: Date.now(),
+                    updatedAt: Date.now()
+                });
+            }
+
+            GM_setValue('tempEnabledDomainGroups', this.tempEnabledDomainGroups);
+        }
+
+        /**
+         * 删除整个域名分组
+         * @param {string} mainDomain 主域名
+         */
+        deleteDomainGroup(mainDomain) {
+            this.tempEnabledDomainGroups = this.tempEnabledDomainGroups.filter(g => g.mainDomain !== mainDomain);
+            GM_setValue('tempEnabledDomainGroups', this.tempEnabledDomainGroups);
+        }
+
+        /**
+         * 从分组中删除单个iframe域名
+         * @param {string} mainDomain 主域名
+         * @param {string} iframeDomain 要删除的iframe域名
+         */
+        removeIframeFromGroup(mainDomain, iframeDomain) {
+            const group = this.tempEnabledDomainGroups.find(g => g.mainDomain === mainDomain);
+            if (group) {
+                group.iframes = group.iframes.filter(d => d !== iframeDomain);
+                group.updatedAt = Date.now();
+                GM_setValue('tempEnabledDomainGroups', this.tempEnabledDomainGroups);
+            }
+        }
+
+        /**
+         * 获取所有启用的域名列表（展平）
+         * @returns {Array<string>}
+         */
+        getAllEnabledDomains() {
+            const allDomains = new Set();
+            this.tempEnabledDomainGroups.forEach(group => {
+                allDomains.add(group.mainDomain);
+                group.iframes.forEach(d => allDomains.add(d));
+            });
+            return Array.from(allDomains);
+        }
+
+        // 2. 核心启动与检查逻辑
+        start() {
+            // 核心菜单命令应该总是可用，无论脚本是否已在此网站启用
+            this.registerCoreMenuCommands();
+
+            if (!this.shouldEnableScript()) {
+                // 如果未启用，则只注册“启用”命令（已在核心中完成），然后返回
+                return;
+            }
+            
+            // 如果已启用，则注册其余的动态菜单命令，并开始初始化
+            this.registerDynamicMenuCommands();
+            this.initialize();
+        }
+
+        shouldEnableScript() {
+            if (this.currentDomain.includes('youtube.com') ||
+                (this.currentDomain.includes('bilibili.com') && window.location.pathname.includes('/video/'))) {
+                return true;
+            }
+
+            // 检查是否在已启用的分组中
+            const allDomains = this.getAllEnabledDomains();
+            return allDomains.includes(this.currentDomain);
+        }
+
+        // 3. 菜单命令注册
+        registerEnableCommand() {
+            GM_registerMenuCommand('在当前网站启用视频倍速控制', () => {
+                // 🔍 检测所有跨域 iframe 域名
+                const crossOriginDomains = this.detectCrossOriginIframeDomains();
+
+                // 💾 保存分组数据
+                this.saveDomainGroup(this.currentDomain, crossOriginDomains);
+
+                // 💬 生成提示信息
+                if (crossOriginDomains.length > 0) {
+                    showNotification(
+                        `✅ 已启用：\n` +
+                        `主域名: ${this.currentDomain}\n` +
+                        `iframe: ${crossOriginDomains.join(', ')}\n\n` +
+                        `请刷新页面以生效。`
+                    );
+
+                    // 打印详细信息到控制台
+                    console.log('=== 视频倍速控制器 ===');
+                    console.log('主域名:', this.currentDomain);
+                    console.log('检测到的跨域 iframe 域名:', crossOriginDomains);
+                    console.log('已保存的分组:', this.tempEnabledDomainGroups);
+                    console.log('========================');
+
+                } else {
+                    showNotification(
+                        `✅ 已在 ${this.currentDomain} 启用\n` +
+                        `请刷新页面`
+                    );
+                }
+            });
+        }
+
+        // 核心菜单命令，应无条件注册
+        registerCoreMenuCommands() {
+             // 仅在脚本未启用时，才显示"启用"命令
+            if (!this.shouldEnableScript()) {
+                this.registerEnableCommand();
+            }
+
+
+            GM_registerMenuCommand('查看所有临时启用的网站', () => {
+                if (this.tempEnabledDomainGroups.length === 0) {
+                    showFloatingMessage('当前没有临时启用的网站');
+                } else {
+                    // 使用弹窗显示分组列表
+                    showDomainManager(this.tempEnabledDomainGroups, this);
+                }
+            });
+        }
+
+        // 动态菜单命令，仅在脚本启用后注册
+        registerDynamicMenuCommands() {
+            GM_registerMenuCommand('设置默认播放速度', () => this.updateSetting('defaultRate', `请输入默认播放速度 (0.1-${this.config.MAX_RATE})`));
+            GM_registerMenuCommand('设置长按右键倍速', () => this.updateSetting('targetRate', `请输入长按右键时的倍速 (0.1-${this.config.MAX_RATE})`));
+            GM_registerMenuCommand('设置快速调速步长', () => this.updateSetting('quickRateStep', `请输入按 [ 或 ] 键调整速度的步长 (0.1-${this.config.MAX_QUICK_RATE_STEP})`, this.config.MAX_QUICK_RATE_STEP));
+            GM_registerMenuCommand('设置目标倍速调整步长', () => this.updateSetting('targetRateStep', `请输入按 +/- 键调整目标倍速的步长 (0.1-${this.config.MAX_RATE})`));
+
+            // 如果当前网站是临时启用的，则提供"移除"选项
+            if (this.tempEnabledDomains.includes(this.currentDomain)) {
+                GM_registerMenuCommand('从临时启用列表中移除当前网站', () => {
+                    const index = this.tempEnabledDomains.indexOf(this.currentDomain);
+                    if (index !== -1) {
+                        this.tempEnabledDomains.splice(index, 1);
+                        GM_setValue('tempEnabledDomains', this.tempEnabledDomains);
+                        showNotification(`已从临时启用列表中移除 ${this.currentDomain}，请刷新页面`);
+                    }
+                });
+            }
+        }
+        
+        updateSetting(key, promptMessage, max = this.config.MAX_RATE) {
+            const newValue = prompt(promptMessage, this.settings[key]);
+            if (newValue !== null) {
+                const value = parseFloat(newValue);
+                if (!isNaN(value) && value >= 0.1 && value <= max) {
+                    this.settings[key] = value;
+                    GM_setValue(key, value);
+                    showFloatingMessage(`设置已更新: ${value}`);
+                    if (key === 'defaultRate' && this.activeVideo) {
+                        this.activeVideo.playbackRate = value;
+                    }
+                } else {
+                    // 使用浮动消息替代 alert
+                    showFloatingMessage(`设置失败: 请输入有效的值 (0.1-${max})`);
+                }
+            }
+        }
+
+
+        // 4. 初始化流程
+        async initialize(isRetry = false) {
+            this.cleanup();
+        
+            try {
+                this.activeVideo = await this._findInitialVideo();
+                console.log("初始化成功, 找到视频:", this.activeVideo);
+        
+                this._setupPersistentObservers();
+                this.setupEventListeners();
+                this.watchUrlChange();
+        
+            } catch (error) {
+                console.warn("初始化尝试失败:", error.message);
+                // 仅在首次尝试时启动重试逻辑
+                if (!isRetry) {
+                    // 如果是特定错误类型，比如找不到视频，则在一段时间后重试
+                    if (error.type === "no_video" || error.type === "timeout") {
+                        setTimeout(() => this.initialize(true).catch(console.error), this.config.INIT_RETRY_DELAY);
+                    }
+                }
+                // 如果是重试失败，则不再继续，避免无限循环
+            }
+        }
+        
+        async _findInitialVideo() {
+            try {
+                // 尝试用快速方法找到视频
+                const video = await this.waitForVideoElement();
+                if (video) {
+                    this.detectAndSetupVideos(); // 确保视频设置完成
+                    return this.activeVideo || video;
+                }
+            } catch (error) {
+                 // 如果快速方法超时或找不到，则尝试深度查找
+                console.log("快速查找失败，尝试深度查找...");
+                const deepVideos = this.deepFindVideoElements();
+                if (deepVideos.length > 0) {
+                    this.setupVideos(deepVideos);
+                    showFloatingMessage(`通过深度查找发现了 ${deepVideos.length} 个视频`);
+                    return deepVideos[0];
+                }
+            }
+            
+            // 如果所有方法都找不到视频，则抛出错误
+            throw { type: "no_video", message: "在页面上找不到任何视频元素。" };
+        }
+        
+        _setupPersistentObservers() {
+            // 1. 合并 videoObserver 和 urlObserver, 并优化回调
+            this.mainObserver = new MutationObserver((mutations) => {
+                // 优先检查 URL 变化，因为它更轻量
+                if (location.href !== this.currentUrl) {
+                    this.handleUrlChange();
+                    // URL 变化通常意味着页面重载或切换，此时可以先返回，等待 initialize
                     return;
                 }
 
-                // 检查是否在输入框或文本区域中
-                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
-                    return;
-                }
-
-                // YouTube 特殊处理
-                if (location.hostname.includes('youtube.com')) {
-                    const videoPlayer = document.querySelector('.html5-video-player') || 
-                                      document.querySelector('#movie_player');
-                    if (!videoPlayer) {
-                        console.log('未找到YouTube播放器元素');
-                        return;
-                    }
-
-                    // 检查事件是否发生在视频播放器区域内
-                    const isInVideoPlayer = videoPlayer.contains(e.target) || e.target === videoPlayer;
-                    
-                    // 如果不在视频播放器区域内，不处理事件
-                    if (!isInVideoPlayer) {
-                        return;
-                    }
-                }
-
-                // 音量控制：上下方向键
-                if (e.code === 'ArrowUp') {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    if (video.volume < 1) {
-                        video.volume = Math.min(1, video.volume + 0.1);
-                        showFloatingMessage(`音量：${Math.round(video.volume * 100)}%`);
-                    }
-                }
-
-                if (e.code === 'ArrowDown') {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    if (video.volume > 0) {
-                        video.volume = Math.max(0, video.volume - 0.1);
-                        showFloatingMessage(`音量：${Math.round(video.volume * 100)}%`);
-                    }
-                }
-
-                // 全屏切换：回车键
-                if (e.code === 'Enter') {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    if (!document.fullscreenElement) {
-                        if (video.requestFullscreen) {
-                            video.requestFullscreen();
-                        } else if (video.webkitRequestFullscreen) {
-                            video.webkitRequestFullscreen();
-                        } else if (video.msRequestFullscreen) {
-                            video.msRequestFullscreen();
+                // 检查 DOM 变动
+                mutations.forEach(mutation => {
+                    // 垃圾回收：检查是否有被管理的视频被移除了
+                    mutation.removedNodes.forEach(removedNode => {
+                        // 检查被移除的节点本身或者其子节点是否是我们正在管理的视频
+                        const videosToRemove = [];
+                        if (this.videoControlButtons.has(removedNode)) {
+                            videosToRemove.push(removedNode);
+                        } else if (removedNode.querySelectorAll) {
+                            removedNode.querySelectorAll('video').forEach(video => {
+                                if (this.videoControlButtons.has(video)) {
+                                    videosToRemove.push(video);
+                                }
+                            });
                         }
-                        showFloatingMessage('进入全屏');
-                    } else {
-                        if (document.exitFullscreen) {
-                            document.exitFullscreen();
-                        } else if (document.webkitExitFullscreen) {
-                            document.webkitExitFullscreen();
-                        } else if (document.msExitFullscreen) {
-                            document.msExitFullscreen();
-                        }
-                        showFloatingMessage('退出全屏');
+
+                        videosToRemove.forEach(video => {
+                             console.log("垃圾回收：清理被移除的视频", video);
+                             const button = this.videoControlButtons.get(video);
+                             if (button) button.remove();
+                             this.videoControlButtons.delete(video);
+                             if (this.activeVideo === video) {
+                                 this.activeVideo = null;
+                             }
+                        });
+                    });
+
+                    // 检查是否有新视频被添加
+                    const hasNewVideos = Array.from(mutation.addedNodes).some(n => n.tagName === 'VIDEO' || (n.querySelector && n.querySelector('video')));
+                    if (hasNewVideos) {
+                         console.log("侦测到新视频相关的DOM变动，调用防抖版检测...");
+                         this.debouncedDetectAndSetupVideos();
                     }
-                }
+                });
+            });
+            this.mainObserver.observe(document.body, { childList: true, subtree: true });
+            this.activeObservers.add(this.mainObserver);
 
-                // 长按 ArrowRight 键：以 targetRate 倍速播放
-                if (e.code === key) {
-                    e.preventDefault(); // 阻止默认行为
-                    e.stopImmediatePropagation(); // 阻止其他事件监听器
-                    downCount++;
-
-                    // 当按键按下次数为2时（长按），设置为 targetRate 倍速
-                    if (downCount === 2) {
-                        originalRate = video.playbackRate;
-                        video.playbackRate = targetRate;
-                        showFloatingMessage(`开始 ${targetRate} 倍速播放`);
+            // 2. 观察当前视频的父节点，以便在视频被替换时重新初始化 (保留)
+            if (this.activeVideo && this.activeVideo.parentElement) {
+                this.videoChangeObserver = new MutationObserver((mutations) => {
+                    const videoWasRemoved = mutations.some(m => Array.from(m.removedNodes).some(n => n === this.activeVideo));
+                    if (videoWasRemoved) {
+                        console.log("侦测到当前活动视频节点被移除，将重新初始化...");
+                        this.initialize().catch(console.error);
                     }
-                }
+                });
+                this.videoChangeObserver.observe(this.activeVideo.parentElement, { childList: true });
+                this.activeObservers.add(this.videoChangeObserver);
+            }
+        }
 
-                // 按】键增加当前播放倍速
-                if (e.code === quickIncreaseKey) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    // 增加速度，最高 16
-                    currentQuickRate = Math.min(16, currentQuickRate + settings.quickRateStep);
-                    video.playbackRate = currentQuickRate;
-                    showFloatingMessage(`当前播放速度：${currentQuickRate.toFixed(2)}x`); // 使用 toFixed 避免过多小数
-                }
+        // 5. 清理与监听
+        cleanup() {
+            if (this.keydownListener) {
+                window.removeEventListener("keydown", this.keydownListener, true);
+                this.keydownListener = null;
+            }
+            if (this.keyupListener) {
+                window.removeEventListener("keyup", this.keyupListener, true);
+                this.keyupListener = null;
+            }
+            this.activeObservers.forEach(observer => observer.disconnect());
+            this.activeObservers.clear();
+            this.videoControlButtons.forEach(button => button.remove());
+            this.videoControlButtons.clear();
+            this.activeVideo = null;
+        }
 
-                // 按【键减少当前播放倍速
-                if (e.code === quickDecreaseKey) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    // 减少速度，最低 0.1
-                    const nextRate = currentQuickRate - settings.quickRateStep;
-                    if (nextRate >= 0.1) {
-                        currentQuickRate = nextRate;
-                        video.playbackRate = currentQuickRate;
-                        showFloatingMessage(`当前播放速度：${currentQuickRate.toFixed(2)}x`); // 使用 toFixed
-                    } else {
-                        showFloatingMessage("播放速度已达到最低值 0.1x");
-                    }
-                }
+        handleUrlChange() {
+            this.currentUrl = location.href;
+            console.log("URL发生变化，重新初始化...");
+            // 使用 setTimeout 延迟执行，确保新页面的 DOM 元素已加载
+            setTimeout(() => this.initialize().catch(console.error), this.config.URL_CHANGE_INIT_DELAY);
+        }
 
-                // 按P键恢复1.0倍速
-                if (e.code === resetSpeedKey || e.key.toLowerCase() === 'p') {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    currentQuickRate = 1.0;
-                    video.playbackRate = 1.0;
-                    showFloatingMessage('恢复正常播放速度');
-                }
+        watchUrlChange() {
+            // MutationObserver 的部分已合并到 mainObserver 中
+            // 这里只处理 History API 的监听
 
-                // 按 + 键：增加 targetRate 的值
-                if (e.code === increaseKey) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    // 增加下次长按倍速，最高 16
-                    targetRate = Math.min(16, targetRate + settings.targetRateStep);
-                    showFloatingMessage(`下次倍速：${targetRate.toFixed(2)}`);
-                }
+            const handleStateChange = this.handleUrlChange.bind(this);
 
-                // 按 - 键：减少 targetRate 的值
-                if (e.code === decreaseKey) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    // 减少下次长按倍速，最低 0.1
-                    const nextTargetRate = targetRate - settings.targetRateStep;
-                    if (nextTargetRate >= 0.1) {
-                        targetRate = nextTargetRate;
-                        showFloatingMessage(`下次倍速：${targetRate.toFixed(2)}`);
-                    } else {
-                        showFloatingMessage("下次倍速已达到最小值 0.1");
-                    }
-                }
-
-                // 逐帧播放：仅在视频暂停时生效
-                if (video.paused && (e.code === 'Comma' || e.code === 'Period')) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    const frameStep = 1 / 30; // 假设 30 FPS
-                    if (e.code === 'Period') {
-                        video.currentTime = Math.min(video.duration, video.currentTime + frameStep);
-                        // showFloatingMessage('下一帧'); // 频繁操作，提示可能过多，暂时注释掉
-                    } else if (e.code === 'Comma') {
-                        video.currentTime = Math.max(0, video.currentTime - frameStep);
-                        // showFloatingMessage('上一帧'); // 频繁操作，提示可能过多，暂时注释掉
-                    }
-                    return; // 处理完逐帧后直接返回
-                }
+            // 使用 History API 监听
+            const originalPushState = history.pushState;
+            const self = this;
+            history.pushState = function() {
+                originalPushState.apply(this, arguments);
+                handleStateChange();
             };
 
-            keyupListener = (e) => {
-                if (e.code !== key) {
-                    return; // 如果不是目标按键，直接返回
+            const originalReplaceState = history.replaceState;
+            history.replaceState = function() {
+                originalReplaceState.apply(this, arguments);
+                handleStateChange();
+            };
+            
+            window.addEventListener('popstate', handleStateChange);
+        }
+
+
+        // 6. 事件监听器设置
+        setupEventListeners() {
+            this.keydownListener = this.handleKeyDown.bind(this);
+            this.keyupListener = this.handleKeyUp.bind(this);
+            window.addEventListener("keydown", this.keydownListener, true);
+            window.addEventListener("keyup", this.keyupListener, true);
+        }
+
+        // 7. 视频查找与设置
+        waitForVideoElement() {
+            return new Promise((resolve, reject) => {
+                const maxAttempts = 20;
+                let attempts = 0;
+                const check = () => {
+                    const video = this.detectAndSetupVideos();
+                    if (video) {
+                        observer.disconnect();
+                        resolve(video);
+                    } else if (++attempts >= maxAttempts) {
+                        observer.disconnect();
+                        reject({ type: "no_video" });
+                    }
+                };
+                const observer = new MutationObserver(check);
+                observer.observe(document.body, { childList: true, subtree: true });
+                this.activeObservers.add(observer);
+                check(); // 立即检查
+                setTimeout(() => {
+                    observer.disconnect();
+                    reject({ type: "timeout" });
+                }, this.config.WAIT_FOR_VIDEO_TIMEOUT);
+            });
+        }
+        
+        deepFindVideoElements() {
+            console.log('开始深度查找视频元素...');
+            const foundVideos = new Set();
+            const find = (element, depth = 0) => {
+                if (depth > 10) return;
+                if (element.tagName === 'VIDEO') foundVideos.add(element);
+                if (element.shadowRoot) find(element.shadowRoot, depth + 1);
+                if (element.contentDocument) find(element.contentDocument, depth + 1);
+                Array.from(element.children || []).forEach(child => find(child, depth + 1));
+            };
+            find(document.body);
+            console.log(`深度查找完成，共找到 ${foundVideos.size} 个视频元素`);
+            return Array.from(foundVideos);
+        }
+        
+        detectAndSetupVideos() {
+            const videos = this.findAllVideos();
+            if (videos.length === 0) return null;
+            this.setupVideos(videos);
+            return this.activeVideo || videos[0];
+        }
+
+        findAllVideos() {
+            const allVideos = new Set(document.querySelectorAll('video'));
+            const findIn = (root) => {
+                try {
+                    root.querySelectorAll('video').forEach(v => allVideos.add(v));
+                    root.querySelectorAll('iframe').forEach(f => {
+                         try {
+                            if (f.contentDocument) findIn(f.contentDocument);
+                         } catch(e) {/* cross-origin */}
+                    });
+                    root.querySelectorAll('*').forEach(el => {
+                        if (el.shadowRoot) findIn(el.shadowRoot);
+                    });
+                } catch(e) {/* ignore */}
+            };
+            findIn(document);
+            return Array.from(allVideos);
+        }
+
+        setupVideos(videos) {
+            if (videos.length === 1) {
+                const video = videos[0];
+                if (video.readyState >= 1 && !this.activeVideo) {
+                    this.activeVideo = video;
+                    this.setDefaultRate(video);
+                }
+            } else if (videos.length > 1) {
+                // 对于配置了特定规则的网站，进行主视频判断
+                if (this.siteConfig.mainVideoSelector || this.siteConfig.mainVideoPredicate) {
+                     if (!this.activeVideo || !videos.includes(this.activeVideo)) {
+                        let mainVideo;
+                        // 优先使用 predicate 函数判断
+                        if (this.siteConfig.mainVideoPredicate) {
+                             mainVideo = videos.find(this.siteConfig.mainVideoPredicate);
+                        }
+                        // 如果没有找到，再使用选择器判断
+                        if (!mainVideo && this.siteConfig.mainVideoSelector) {
+                            mainVideo = videos.find(v => v.matches(this.siteConfig.mainVideoSelector));
+                        }
+                         // 如果还是没有，则找一个未暂停的作为补充
+                        if (!mainVideo) {
+                             mainVideo = videos.find(v => !v.paused);
+                        }
+
+                        this.activeVideo = mainVideo || videos[0];
+                        this.setDefaultRate(this.activeVideo);
+                    }
+                } else {
+                    // 其他网站，创建控制按钮
+                    videos.forEach((video, index) => {
+                        if (!this.videoControlButtons.has(video) && video.readyState >= 1) {
+                            this.createVideoControlButton(video, index + 1);
+                            this.setDefaultRate(video);
+                            if (!this.activeVideo) this.activeVideo = video;
+                        }
+                    });
+                }
+            }
+        }
+        
+        setDefaultRate(video) {
+            if (Date.now() - this.lastManualRateChangeTime > 5000) {
+                video.playbackRate = this.settings.defaultRate;
+            }
+        }
+
+        createVideoControlButton(video, index) {
+            // 检查是否已存在按钮，避免重复创建
+            if (this.videoControlButtons.has(video)) {
+                return;
+            }
+
+            // 创建圆形标签（24px，纯圆形无文字设计）
+            const button = document.createElement('div');
+            Object.assign(button.style, {
+                position: 'absolute',
+                top: '10px',
+                left: '10px',
+                width: '24px',
+                height: '24px',
+                borderRadius: '50%',
+                background: 'rgba(255, 255, 255, 0.15)',
+                border: '1px solid rgba(255, 255, 255, 0.3)',
+                color: 'white',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+                userSelect: 'none',
+                zIndex: '9999'
+            });
+
+            // 悬停效果
+            button.addEventListener('mouseenter', (e) => {
+                // 如果已激活，不显示提示
+                if (button.classList.contains('active')) {
+                    return;
                 }
 
+                // 悬停时放大
+                button.style.transform = 'scale(1.3)';
+                button.style.background = 'rgba(255, 255, 255, 0.25)';
+                button.style.borderColor = 'rgba(255, 255, 255, 0.5)';
+
+                // 显示 tooltip
+                this.showTooltip(button, '选择视频');
+            });
+
+            button.addEventListener('mouseleave', () => {
+                if (!button.classList.contains('active')) {
+                    button.style.transform = 'scale(1)';
+                    button.style.background = 'rgba(255, 255, 255, 0.15)';
+                    button.style.borderColor = 'rgba(255, 255, 255, 0.3)';
+                }
+            });
+
+            // 点击切换事件
+            button.addEventListener('click', (e) => {
+                e.stopPropagation(); // 防止触发视频播放
+                this.switchActiveVideo(video, button);
+            });
+
+            // 如果是当前活动视频，设为激活状态
+            if (!this.activeVideo) {
+                this.activeVideo = video;
+                this.setActiveButton(button);
+            } else if (video === this.activeVideo) {
+                this.setActiveButton(button);
+            }
+
+            // 获取父容器
+            const container = video.parentElement || document.body;
+            const computedStyle = window.getComputedStyle(container);
+            if (computedStyle.position === 'static') {
+                container.style.position = 'relative';
+            }
+
+            // 添加到DOM
+            container.appendChild(button);
+            this.videoControlButtons.set(video, button);
+        }
+
+        /**
+         * 显示 tooltip 提示
+         * @param {HTMLElement} target 目标元素
+         * @param {string} text 提示文字
+         */
+        showTooltip(target, text) {
+            const tooltip = document.createElement('div');
+            Object.assign(tooltip.style, {
+                position: 'fixed',
+                background: 'rgba(0, 0, 0, 0.9)',
+                color: 'white',
+                padding: '4px 8px',
+                borderRadius: '4px',
+                fontSize: '10px',
+                whiteSpace: 'nowrap',
+                pointerEvents: 'none',
+                zIndex: '10000',
+                opacity: '0',
+                transition: 'opacity 0.2s ease',
+                fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif'
+            });
+            tooltip.textContent = text;
+
+            // 定位 tooltip
+            document.body.appendChild(tooltip);
+            const rect = target.getBoundingClientRect();
+
+            // 计算位置
+            let tooltipLeft = rect.left + (rect.width / 2) - (tooltip.offsetWidth / 2);
+            let tooltipTop = rect.top - tooltip.offsetHeight - 8;
+
+            // 边界检测
+            if (tooltipLeft < 10) {
+                tooltipLeft = 10;
+            }
+            if (tooltipLeft + tooltip.offsetWidth > window.innerWidth - 10) {
+                tooltipLeft = window.innerWidth - tooltip.offsetWidth - 10;
+            }
+            if (tooltipTop < 10) {
+                tooltipTop = rect.bottom + 8;
+            }
+
+            tooltip.style.left = tooltipLeft + 'px';
+            tooltip.style.top = tooltipTop + 'px';
+
+            // 显示
+            setTimeout(() => tooltip.style.opacity = '1', 10);
+
+            // 3秒后自动消失
+            setTimeout(() => {
+                tooltip.style.opacity = '0';
+                setTimeout(() => tooltip.remove(), 200);
+            }, 3000);
+        }
+
+        /**
+         * 切换活动视频
+         * @param {HTMLVideoElement} video 目标视频元素
+         * @param {HTMLElement} button 按钮元素
+         */
+        switchActiveVideo(video, button) {
+            // 重置所有按钮样式
+            this.videoControlButtons.forEach((btn) => {
+                this.resetButtonStyle(btn);
+            });
+
+            // 激活当前按钮
+            this.setActiveButton(button);
+
+            // 切换活动视频
+            this.activeVideo = video;
+
+            // 显示提示消息
+            showFloatingMessage('已切换到该视频控制');
+        }
+
+        /**
+         * 设置按钮为激活状态
+         * @param {HTMLElement} button 按钮元素
+         */
+        setActiveButton(button) {
+            button.classList.add('active');
+            button.style.background = 'rgba(0, 128, 255, 0.3)';
+            button.style.borderColor = 'rgba(0, 128, 255, 0.3)';
+            button.style.boxShadow = '0 0 8px rgba(0, 128, 255, 0.3)';
+            button.style.transform = 'scale(1)';
+
+            // 添加中心小点指示器
+            const dot = document.createElement('div');
+            Object.assign(dot.style, {
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -50%)',
+                width: '4px',
+                height: '4px',
+                background: 'rgba(255, 255, 255, 0.5)',
+                borderRadius: '50%',
+                pointerEvents: 'none'
+            });
+            button.appendChild(dot);
+        }
+
+        /**
+         * 重置按钮为默认状态
+         * @param {HTMLElement} button 按钮元素
+         */
+        resetButtonStyle(button) {
+            button.classList.remove('active');
+            button.style.background = 'rgba(255, 255, 255, 0.15)';
+            button.style.borderColor = 'rgba(255, 255, 255, 0.3)';
+            button.style.boxShadow = 'none';
+            button.style.transform = 'scale(1)';
+            // 移除中心小点
+            const dot = button.querySelector('div');
+            if (dot) dot.remove();
+        }
+
+        // 8. 按键事件处理
+        handleKeyDown(e) {
+            // 忽略因长按而重复触发的 keydown 事件 (除了右箭头，它有自己的长按逻辑)
+            if (e.repeat && e.code !== 'ArrowRight') {
+                return;
+            }
+            
+            const path = e.composedPath();
+            const isInputFocused = path.some(el => el.isContentEditable || ['INPUT', 'TEXTAREA'].includes(el.tagName));
+            if (isInputFocused || !this.activeVideo) {
+                return;
+            }
+        
+            const handler = this.keyHandlers[e.code];
+            if (handler) {
                 e.preventDefault();
                 e.stopImmediatePropagation();
+                handler();
+            }
+        }
 
-                // 单击 ArrowRight 键：跳转5秒
-                if (downCount === 1) {
-                    video.currentTime += 5;
+        handleKeyUp(e) {
+            // 拦截空格键的 keyup 事件，防止冲突
+            if (e.code === 'Space' && this.currentDomain.includes('youtube.com')) {
+                 e.preventDefault();
+                 e.stopImmediatePropagation();
+            }
+
+            if (e.code === 'ArrowRight') {
+                clearTimeout(this.rightKeyTimer);
+                this.rightKeyTimer = null;
+                
+                if (this.downCount < this.config.SHORT_PRESS_MAX_COUNT) { //判定为短按
+                    this.seek(this.config.SEEK_STEP_SECONDS);
+                } else { //判定为长按
+                     if(this.activeVideo) {
+                        this.activeVideo.playbackRate = this.originalRate;
+                        showFloatingMessage(`恢复播放速度: ${this.originalRate.toFixed(1)}x`);
+                     }
                 }
-
-                // 长按 ArrowRight 键：恢复原速
-                if (downCount >= 2) {
-                    video.playbackRate = originalRate;
-                    showFloatingMessage(`恢复 ${originalRate} 倍速播放`);
-                }
-
-                downCount = 0; // 重置按下计数
+                this.downCount = 0;
+            }
+        }
+        
+        // 9. 按键处理器和具体功能实现
+        _initializeKeyHandlers() {
+            this.keyHandlers = {
+                // 直接使用 .bind 将函数与参数关联，代码更紧凑
+                'ArrowUp': this.adjustVolume.bind(this, this.config.VOLUME_STEP),
+                'ArrowDown': this.adjustVolume.bind(this, -this.config.VOLUME_STEP),
+                'Enter': this.toggleFullScreen.bind(this),
+                'Space': this.togglePlayPause.bind(this),
+                'ArrowLeft': this.seek.bind(this, -this.config.SEEK_STEP_SECONDS),
+                'ArrowRight': this.handleRightArrowPress.bind(this), // 此函数逻辑复杂，保留原样
+                'Equal': this.adjustTargetRate.bind(this, this.settings.targetRateStep),
+                'Minus': this.adjustTargetRate.bind(this, -this.settings.targetRateStep),
+                'BracketRight': this.adjustPlaybackRate.bind(this, this.settings.quickRateStep),
+                'BracketLeft': this.adjustPlaybackRate.bind(this, -this.settings.quickRateStep),
+                'KeyP': this.resetPlaybackRate.bind(this),
+                'Comma': this.frameStep.bind(this, -1),
+                'Period': this.frameStep.bind(this, 1),
             };
+        }
 
-            // 绑定事件监听器
-            document.addEventListener("keydown", keydownListener, true);
-            document.addEventListener("keyup", keyupListener, true);
+        // 移除了 _handle... 系列的中间函数，因为它们已被 .bind 替代
 
-            return true;
-        } catch (error) {
-            console.error("初始化失败:", error);
-            return false;
+        adjustVolume(delta) {
+            this.activeVideo.volume = Math.max(0, Math.min(1, this.activeVideo.volume + delta));
+            showFloatingMessage(`音量：${Math.round(this.activeVideo.volume * 100)}%`);
+        }
+
+        toggleFullScreen() {
+            // 优先使用网站特定选择器
+            if (this.siteConfig.fullscreenButtonSelector) {
+                const fsButton = document.querySelector(this.siteConfig.fullscreenButtonSelector);
+                if (fsButton) {
+                    fsButton.click();
+                    return;
+                }
+            }
+
+            // 通用备用方案：使用原生API
+            console.log('未找到特定网站的全屏按钮，使用原生API。');
+            if (!document.fullscreenElement) {
+                if (this.activeVideo.requestFullscreen) {
+                    this.activeVideo.requestFullscreen();
+                } else if (this.activeVideo.webkitRequestFullscreen) {
+                    this.activeVideo.webkitRequestFullscreen();
+                } else if (this.activeVideo.msRequestFullscreen) {
+                    this.activeVideo.msRequestFullscreen();
+                }
+                showFloatingMessage('进入全屏');
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                } else if (document.msExitFullscreen) {
+                    document.msExitFullscreen();
+                }
+                showFloatingMessage('退出全屏');
+            }
+        }
+
+        togglePlayPause() {
+            if (this.activeVideo.paused) {
+                this.activeVideo.play();
+                showFloatingMessage('播放');
+            } else {
+                this.activeVideo.pause();
+                showFloatingMessage('暂停');
+            }
+        }
+        
+        seek(delta) {
+            if (this.activeVideo.paused) this.activeVideo.play();
+            this.activeVideo.currentTime = Math.max(0, this.activeVideo.currentTime + delta);
+            showFloatingMessage(`快${delta > 0 ? '进' : '退'} ${this.config.SEEK_STEP_SECONDS} 秒`);
+        }
+        
+        // 此方法逻辑复杂，保留原名，仅在 handler 中调用
+        handleRightArrowPress() {
+            if (this.activeVideo.paused) this.activeVideo.play();
+
+            if (this.downCount === 0) {
+                this.originalRate = this.activeVideo.playbackRate;
+                this.rightKeyTimer = setTimeout(() => {
+                    this.activeVideo.playbackRate = this.targetRate;
+                    showFloatingMessage(`倍速播放: ${this.targetRate.toFixed(2)}x`);
+                    this.downCount = this.config.SHORT_PRESS_MAX_COUNT; // 设置为长按状态
+                }, this.LONG_PRESS_DELAY);
+            }
+            this.downCount++;
+        }
+
+        adjustTargetRate(delta) {
+            this.targetRate = Math.max(0.1, Math.min(this.config.MAX_RATE, this.targetRate + delta));
+            this.lastManualRateChangeTime = Date.now();
+            showFloatingMessage(`目标倍速设置为: ${this.targetRate.toFixed(2)}x`);
+        }
+        
+        adjustPlaybackRate(delta) {
+            const newRate = Math.max(0.1, Math.min(this.config.MAX_RATE, this.activeVideo.playbackRate + delta));
+            this.activeVideo.playbackRate = newRate;
+            this.lastManualRateChangeTime = Date.now();
+            showFloatingMessage(`播放速度: ${newRate.toFixed(2)}x`);
+        }
+        
+        resetPlaybackRate() {
+            this.activeVideo.playbackRate = this.settings.defaultRate;
+            this.lastManualRateChangeTime = Date.now();
+            showFloatingMessage(`播放速度重置为: ${this.settings.defaultRate.toFixed(2)}x`);
+        }
+        
+        frameStep(direction) {
+            if (this.activeVideo.paused) {
+                 this.activeVideo.currentTime += (direction / this.config.DEFAULT_FPS);
+                 showFloatingMessage(direction > 0 ? `下一帧` : `上一帧`);
+            }
         }
     }
 
-    // 监听 URL 变化
-    function watchUrlChange() {
-        urlObserver = new MutationObserver(() => {
-            if (location.href !== currentUrl) {
-                currentUrl = location.href;
-                console.log("URL变化，重新初始化");
-                cleanup();
-                setTimeout(() => init().catch(console.error), 1000);
-            }
-        });
-
-        urlObserver.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
-        activeObservers.add(urlObserver);
-
-        // 增强的 History API 监听
-        const handleStateChange = () => {
-            if (location.href !== currentUrl) {
-                currentUrl = location.href;
-                cleanup();
-                setTimeout(() => init().catch(console.error), 1000);
-            }
-        };
-
-        const originalPushState = history.pushState;
-        const originalReplaceState = history.replaceState;
-
-        history.pushState = function() {
-            originalPushState.apply(this, arguments);
-            handleStateChange();
-        };
-
-        history.replaceState = function() {
-            originalReplaceState.apply(this, arguments);
-            handleStateChange();
-        };
-
-        window.addEventListener('popstate', handleStateChange);
-    }
-
     // 启动脚本
-    const startScript = async () => {
-        let retryCount = 0;
-        const maxRetries = 3;
+    const controller = new VideoController();
+    controller.start();
 
-        const tryInit = async () => {
-            try {
-                const success = await init();
-                if (success) {
-                    watchUrlChange();
-                } else if (retryCount < maxRetries) {
-                    retryCount++;
-                    console.warn(`初始化重试 (${retryCount}/${maxRetries})`); // 改为警告
-                    setTimeout(tryInit, 2000);
-                }
-            } catch (error) {
-                // 检查错误类型
-                if (error && (error.type === "no_video" || error.type === "timeout")) {
-                    return; // 直接返回，不做额外处理
-                }
-                console.warn("启动失败:", error);
-                if (retryCount < maxRetries) {
-                    retryCount++;
-                    setTimeout(tryInit, 2000);
-                }
-            }
-        };
-
-        tryInit();
-    };
-
-    startScript();
 })();
