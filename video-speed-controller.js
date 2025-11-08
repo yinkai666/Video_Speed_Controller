@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.5.3
+// @version      1.5.4
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
 // @author       ternece
@@ -436,6 +436,8 @@
             this.videoControlButtons = new Map();
             this.rightKeyTimer = null;
             this.downCount = 0;
+            this._keyupCallCount = 0; // 调试：KeyUp调用次数
+            this._rightKeyUpHandled = false; // 防止重复处理
             this.originalRate = 1.0;
             this.targetRate = this.settings.targetRate;
             this.currentQuickRate = 1.0;
@@ -594,7 +596,6 @@
             if (window.self !== window.top) {
                 const hasVideo = document.querySelector('video') !== null;
                 if (hasVideo) {
-                    console.log('✅ iframe 中检测到视频，启用脚本');
                     return true;
                 }
                 return false;
@@ -1242,16 +1243,29 @@
             }
 
             if (e.code === 'ArrowRight') {
+                // 防止重复处理 - 双重保险
+                // 1. 事件对象标记
+                if (e._videoControllerHandled) {
+                    return;
+                }
+                e._videoControllerHandled = true;
+
+                // 2. 全局标记
+                if (this._rightKeyUpHandled) {
+                    return;
+                }
+                this._rightKeyUpHandled = true;
+
                 clearTimeout(this.rightKeyTimer);
                 this.rightKeyTimer = null;
-                
+
                 if (this.downCount < this.config.SHORT_PRESS_MAX_COUNT) { //判定为短按
                     this.seek(this.config.SEEK_STEP_SECONDS);
                 } else { //判定为长按
-                     if(this.activeVideo) {
+                    if(this.activeVideo) {
                         this.activeVideo.playbackRate = this.originalRate;
                         showFloatingMessage(`恢复播放速度: ${this.originalRate.toFixed(1)}x`);
-                     }
+                    }
                 }
                 this.downCount = 0;
             }
@@ -1295,7 +1309,6 @@
             }
 
             // 通用备用方案：使用原生API
-            console.log('未找到特定网站的全屏按钮，使用原生API。');
             if (!document.fullscreenElement) {
                 if (this.activeVideo.requestFullscreen) {
                     this.activeVideo.requestFullscreen();
@@ -1336,6 +1349,9 @@
         // 此方法逻辑复杂，保留原名，仅在 handler 中调用
         handleRightArrowPress() {
             if (this.activeVideo.paused) this.activeVideo.play();
+
+            // 重置标记，允许新的KeyUp处理
+            this._rightKeyUpHandled = false;
 
             if (this.downCount === 0) {
                 this.originalRate = this.activeVideo.playbackRate;
