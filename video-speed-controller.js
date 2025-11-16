@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.5.5
+// @version      1.5.6
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
 // @author       ternece
@@ -602,10 +602,15 @@
         }
 
         shouldEnableScript() {
-            // 如果在 iframe 中，检查是否有视频
+            // 如果在 iframe 中，检查是否有视频或在启用列表中
             if (window.self !== window.top) {
                 const hasVideo = document.querySelector('video') !== null;
                 if (hasVideo) {
+                    return true;
+                }
+                // 检查当前域名是否在启用列表中
+                const allDomains = this.getAllEnabledDomains();
+                if (allDomains.includes(this.currentDomain)) {
                     return true;
                 }
                 return false;
@@ -725,15 +730,22 @@
                 this.watchUrlChange();
         
             } catch (error) {
+                // 只在主页面且有 iframe 时静默退出
+                if (window.self === window.top) {
+                    const hasIframe = document.querySelector('iframe') !== null;
+                    if (hasIframe) {
+                        return;
+                    }
+                }
+
                 console.warn("初始化尝试失败:", error.message);
+
                 // 仅在首次尝试时启动重试逻辑
                 if (!isRetry) {
-                    // 如果是特定错误类型，比如找不到视频，则在一段时间后重试
                     if (error.type === "no_video" || error.type === "timeout") {
                         setTimeout(() => this.initialize(true).catch(console.error), this.config.INIT_RETRY_DELAY);
                     }
                 }
-                // 如果是重试失败，则不再继续，避免无限循环
             }
         }
         
