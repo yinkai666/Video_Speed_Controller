@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.5.4
+// @version      1.5.5
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
 // @author       ternece
@@ -457,31 +457,38 @@
         }
 
         /**
-         * 检测并返回所有跨域 iframe 的域名
+         * 检测并返回所有跨域 iframe 的域名（包括嵌套 iframe）
          * @returns {Array<string>} 域名数组
          */
         detectCrossOriginIframeDomains() {
             const crossDomainIframes = new Set();
-            const iframes = document.querySelectorAll('iframe');
 
-            iframes.forEach(iframe => {
-                try {
-                    const src = iframe.src;
-                    if (!src) return; // 跳过没有 src 的 iframe
+            const findIframes = (root, depth = 0) => {
+                if (depth > 5) return;
 
-                    const url = new URL(src);
-                    const domain = url.hostname;
+                const iframes = root.querySelectorAll('iframe');
+                iframes.forEach(iframe => {
+                    try {
+                        const src = iframe.src;
+                        if (src) {
+                            const url = new URL(src);
+                            const domain = url.hostname;
+                            if (domain && domain !== this.currentDomain) {
+                                crossDomainIframes.add(domain);
+                            }
+                        }
 
-                    // 如果不是当前域名，添加到列表
-                    if (domain !== this.currentDomain) {
-                        crossDomainIframes.add(domain);
+                        // 尝试递归检测嵌套 iframe（仅限同源）
+                        if (iframe.contentDocument) {
+                            findIframes(iframe.contentDocument, depth + 1);
+                        }
+                    } catch (e) {
+                        // 忽略跨域错误
                     }
-                } catch (e) {
-                    // 忽略无效的 src（如 javascript: 协议）
-                    console.warn('检测到无效的 iframe src:', iframe.src);
-                }
-            });
+                });
+            };
 
+            findIframes(document);
             return Array.from(crossDomainIframes);
         }
 
@@ -521,12 +528,16 @@
                 const existingGroup = this.tempEnabledDomainGroups[existingIndex];
                 // 合并iframe域名（去重）
                 const combinedIframes = [...new Set([...existingGroup.iframes, ...iframeDomains])];
-                this.tempEnabledDomainGroups[existingIndex] = {
-                    mainDomain,
-                    iframes: combinedIframes,
-                    createdAt: existingGroup.createdAt,
-                    updatedAt: Date.now()
-                };
+                // 只有当有新的iframe域名时才更新
+                if (combinedIframes.length > existingGroup.iframes.length) {
+                    this.tempEnabledDomainGroups[existingIndex] = {
+                        mainDomain,
+                        iframes: combinedIframes,
+                        createdAt: existingGroup.createdAt,
+                        updatedAt: Date.now()
+                    };
+                    GM_setValue('tempEnabledDomainGroups', this.tempEnabledDomainGroups);
+                }
             } else {
                 // 创建新分组
                 this.tempEnabledDomainGroups.push({
@@ -535,9 +546,8 @@
                     createdAt: Date.now(),
                     updatedAt: Date.now()
                 });
+                GM_setValue('tempEnabledDomainGroups', this.tempEnabledDomainGroups);
             }
-
-            GM_setValue('tempEnabledDomainGroups', this.tempEnabledDomainGroups);
         }
 
         /**
@@ -900,10 +910,9 @@
                     if (iframeWindow && iframeWindow !== window) {
                         iframeWindow.addEventListener("keydown", this.keydownListener, true);
                         iframeWindow.addEventListener("keyup", this.keyupListener, true);
-                        console.log('✅ 已在 iframe 中设置键盘监听');
                     }
                 } catch(e) {
-                    console.warn('⚠️ 无法在 iframe 中设置监听器:', e.message);
+                    // 忽略跨域错误
                 }
             }
         }
