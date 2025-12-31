@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.5.3
+// @version      1.6.0
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
 // @author       ternece
@@ -175,9 +175,9 @@
         clearAllBtn.onclick = () => {
             if (confirm("确定要清空所有临时启用的网站吗？\n\n注意：YouTube 和 Bilibili 不会受影响")) {
                 controller.tempEnabledDomainGroups = [];
-                controller.tempEnabledDomains = [];
                 GM_setValue('tempEnabledDomainGroups', controller.tempEnabledDomainGroups);
-                GM_setValue('tempEnabledDomains', controller.tempEnabledDomains);
+                // 🔧 同时清空旧格式数据（如果存在）
+                GM_setValue('tempEnabledDomains', []);
                 document.body.removeChild(overlay);
                 showNotification("✅ 已清空临时启用列表\n请刷新页面");
             }
@@ -428,7 +428,8 @@
             };
             // 使用分组数据结构：主域名 -> 包含的iframe域名
             this.tempEnabledDomainGroups = GM_getValue('tempEnabledDomainGroups', []);
-            this.tempEnabledDomains = GM_getValue('tempEnabledDomains', []); // 保留兼容
+            // 🔧 迁移旧数据：将 tempEnabledDomains 迁移到 tempEnabledDomainGroups
+            this._migrateOldDomainData();
             this.currentDomain = window.location.hostname;
             this.currentUrl = location.href;
             this.lastManualRateChangeTime = 0;
@@ -436,6 +437,8 @@
             this.videoControlButtons = new Map();
             this.rightKeyTimer = null;
             this.downCount = 0;
+            this._keyupCallCount = 0; // 调试：KeyUp调用次数
+            this._rightKeyUpHandled = false; // 防止重复处理
             this.originalRate = 1.0;
             this.targetRate = this.settings.targetRate;
             this.currentQuickRate = 1.0;
@@ -446,6 +449,8 @@
             this.keyupListener = null;
             this.mainObserver = null; // 合并后的主观察器
             this.videoChangeObserver = null;
+            this.fallbackVideoObserver = null; // 后备视频监听器
+            this.fallbackPollingTimer = null; // 后备轮询定时器
             this.activeObservers = new Set();
 
             // 创建防抖版的视频检测函数
@@ -455,54 +460,76 @@
         }
 
         /**
-         * 检测并返回所有跨域 iframe 的域名
+         * 🔧 迁移旧版本的域名数据到新的分组结构
+         * 将 tempEnabledDomains 中的域名迁移到 tempEnabledDomainGroups
+         */
+        _migrateOldDomainData() {
+            const oldDomains = GM_getValue('tempEnabledDomains', []);
+            if (oldDomains.length === 0) return;
+
+            // 获取已存在的主域名
+            const existingMainDomains = new Set(this.tempEnabledDomainGroups.map(g => g.mainDomain));
+
+            // 将旧数据中未迁移的域名添加为新的分组
+            let migrated = false;
+            oldDomains.forEach(domain => {
+                if (!existingMainDomains.has(domain)) {
+                    this.tempEnabledDomainGroups.push({
+                        mainDomain: domain,
+                        iframes: [],
+                        createdAt: Date.now(),
+                        updatedAt: Date.now(),
+                        migratedFrom: 'tempEnabledDomains'
+                    });
+                    migrated = true;
+                }
+            });
+
+            if (migrated) {
+                GM_setValue('tempEnabledDomainGroups', this.tempEnabledDomainGroups);
+                // 清空旧数据
+                GM_setValue('tempEnabledDomains', []);
+                console.log('✅ 已将旧版域名数据迁移到新的分组结构');
+            }
+        }
+
+        /**
+         * 检测并返回所有跨域 iframe 的域名（包括嵌套 iframe）
          * @returns {Array<string>} 域名数组
          */
         detectCrossOriginIframeDomains() {
             const crossDomainIframes = new Set();
-            const iframes = document.querySelectorAll('iframe');
 
-            iframes.forEach(iframe => {
-                try {
-                    const src = iframe.src;
-                    if (!src) return; // 跳过没有 src 的 iframe
+            const allIframes = document.querySelectorAll('iframe');
 
-                    const url = new URL(src);
-                    const domain = url.hostname;
+            const findIframes = (root, depth = 0) => {
+                if (depth > 5) return;
 
-                    // 如果不是当前域名，添加到列表
-                    if (domain !== this.currentDomain) {
-                        crossDomainIframes.add(domain);
+                const iframes = root.querySelectorAll('iframe');
+                iframes.forEach((iframe, i) => {
+                    try {
+                        const src = iframe.src;
+
+                        if (src && src.startsWith('http')) {
+                            const url = new URL(src);
+                            const domain = url.hostname;
+                            if (domain && domain !== this.currentDomain) {
+                                crossDomainIframes.add(domain);
+                            }
+                        }
+
+                        // 尝试递归检测嵌套 iframe（仅限同源）
+                        if (iframe.contentDocument) {
+                            findIframes(iframe.contentDocument, depth + 1);
+                        }
+                    } catch (e) {
+                        // 跨域访问错误，忽略
                     }
-                } catch (e) {
-                    // 忽略无效的 src（如 javascript: 协议）
-                    console.warn('检测到无效的 iframe src:', iframe.src);
-                }
-            });
+                });
+            };
 
+            findIframes(document);
             return Array.from(crossDomainIframes);
-        }
-
-        /**
-         * 批量启用域名到临时列表
-         * @param {Array<string>} domains 域名数组
-         * @returns {Array<string>} 新添加的域名数组
-         */
-        enableDomainsInTempList(domains) {
-            const newlyEnabled = [];
-
-            domains.forEach(domain => {
-                if (!this.tempEnabledDomains.includes(domain)) {
-                    this.tempEnabledDomains.push(domain);
-                    newlyEnabled.push(domain);
-                }
-            });
-
-            if (newlyEnabled.length > 0) {
-                GM_setValue('tempEnabledDomains', this.tempEnabledDomains);
-            }
-
-            return newlyEnabled;
         }
 
         /**
@@ -519,12 +546,16 @@
                 const existingGroup = this.tempEnabledDomainGroups[existingIndex];
                 // 合并iframe域名（去重）
                 const combinedIframes = [...new Set([...existingGroup.iframes, ...iframeDomains])];
-                this.tempEnabledDomainGroups[existingIndex] = {
-                    mainDomain,
-                    iframes: combinedIframes,
-                    createdAt: existingGroup.createdAt,
-                    updatedAt: Date.now()
-                };
+                // 只有当有新的iframe域名时才更新
+                if (combinedIframes.length > existingGroup.iframes.length) {
+                    this.tempEnabledDomainGroups[existingIndex] = {
+                        mainDomain,
+                        iframes: combinedIframes,
+                        createdAt: existingGroup.createdAt,
+                        updatedAt: Date.now()
+                    };
+                    GM_setValue('tempEnabledDomainGroups', this.tempEnabledDomainGroups);
+                }
             } else {
                 // 创建新分组
                 this.tempEnabledDomainGroups.push({
@@ -533,9 +564,8 @@
                     createdAt: Date.now(),
                     updatedAt: Date.now()
                 });
+                GM_setValue('tempEnabledDomainGroups', this.tempEnabledDomainGroups);
             }
-
-            GM_setValue('tempEnabledDomainGroups', this.tempEnabledDomainGroups);
         }
 
         /**
@@ -576,25 +606,36 @@
 
         // 2. 核心启动与检查逻辑
         start() {
-            // 核心菜单命令应该总是可用，无论脚本是否已在此网站启用
-            this.registerCoreMenuCommands();
+            // 🔧 修复: 只有主页面才注册菜单命令，iframe 中不注册
+            const isMainPage = window.self === window.top;
+
+            if (isMainPage) {
+                // 核心菜单命令应该总是可用，无论脚本是否已在此网站启用
+                this.registerCoreMenuCommands();
+            }
 
             if (!this.shouldEnableScript()) {
-                // 如果未启用，则只注册“启用”命令（已在核心中完成），然后返回
+                // 如果未启用，则只注册"启用"命令（已在核心中完成），然后返回
                 return;
             }
-            
+
             // 如果已启用，则注册其余的动态菜单命令，并开始初始化
-            this.registerDynamicMenuCommands();
+            if (isMainPage) {
+                this.registerDynamicMenuCommands();
+            }
             this.initialize();
         }
 
         shouldEnableScript() {
-            // 如果在 iframe 中，检查是否有视频
+            // 如果在 iframe 中，检查是否有视频或在启用列表中
             if (window.self !== window.top) {
                 const hasVideo = document.querySelector('video') !== null;
                 if (hasVideo) {
-                    console.log('✅ iframe 中检测到视频，启用脚本');
+                    return true;
+                }
+                // 检查当前域名是否在启用列表中
+                const allDomains = this.getAllEnabledDomains();
+                if (allDomains.includes(this.currentDomain)) {
                     return true;
                 }
                 return false;
@@ -670,14 +711,11 @@
             GM_registerMenuCommand('设置目标倍速调整步长', () => this.updateSetting('targetRateStep', `请输入按 +/- 键调整目标倍速的步长 (0.1-${this.config.MAX_RATE})`));
 
             // 如果当前网站是临时启用的，则提供"移除"选项
-            if (this.tempEnabledDomains.includes(this.currentDomain)) {
+            const currentGroup = this.tempEnabledDomainGroups.find(g => g.mainDomain === this.currentDomain);
+            if (currentGroup) {
                 GM_registerMenuCommand('从临时启用列表中移除当前网站', () => {
-                    const index = this.tempEnabledDomains.indexOf(this.currentDomain);
-                    if (index !== -1) {
-                        this.tempEnabledDomains.splice(index, 1);
-                        GM_setValue('tempEnabledDomains', this.tempEnabledDomains);
-                        showNotification(`已从临时启用列表中移除 ${this.currentDomain}，请刷新页面`);
-                    }
+                    this.deleteDomainGroup(this.currentDomain);
+                    showNotification(`已从临时启用列表中移除 ${this.currentDomain}，请刷新页面`);
                 });
             }
         }
@@ -703,27 +741,75 @@
 
         // 4. 初始化流程
         async initialize(isRetry = false) {
-            this.cleanup();
-        
+            // 🔧 修复: 使用专门的重初始化清理，不清除后备监听器
+            this._cleanupForReinit();
+
             try {
                 this.activeVideo = await this._findInitialVideo();
                 console.log("初始化成功, 找到视频:", this.activeVideo);
-        
+
+                // 🔧 修复: 成功初始化后才清除后备监听器
+                this._cleanupFallbackObserver();
+
                 this._setupPersistentObservers();
                 this.setupEventListeners();
                 this.watchUrlChange();
-        
+
             } catch (error) {
                 console.warn("初始化尝试失败:", error.message);
+
                 // 仅在首次尝试时启动重试逻辑
                 if (!isRetry) {
-                    // 如果是特定错误类型，比如找不到视频，则在一段时间后重试
                     if (error.type === "no_video" || error.type === "timeout") {
                         setTimeout(() => this.initialize(true).catch(console.error), this.config.INIT_RETRY_DELAY);
                     }
+                } else {
+                    // 重试也失败了，设置持续监听器以捕获延迟加载的视频
+                    console.log("重试失败，准备设置后备监听器...");
+                    try {
+                        this._setupFallbackVideoObserver();
+                    } catch (e) {
+                        console.error("设置后备监听器时出错:", e);
+                    }
                 }
-                // 如果是重试失败，则不再继续，避免无限循环
             }
+        }
+
+        /**
+         * 专门用于重新初始化的清理方法
+         * 不清除后备监听器，保留其继续监听
+         */
+        _cleanupForReinit() {
+            if (this.keydownListener) {
+                window.removeEventListener("keydown", this.keydownListener, true);
+                if (this.activeVideo) {
+                    try {
+                        const iframeWindow = this.activeVideo.ownerDocument.defaultView;
+                        if (iframeWindow && iframeWindow !== window) {
+                            iframeWindow.removeEventListener("keydown", this.keydownListener, true);
+                        }
+                    } catch(e) {}
+                }
+                this.keydownListener = null;
+            }
+            if (this.keyupListener) {
+                window.removeEventListener("keyup", this.keyupListener, true);
+                if (this.activeVideo) {
+                    try {
+                        const iframeWindow = this.activeVideo.ownerDocument.defaultView;
+                        if (iframeWindow && iframeWindow !== window) {
+                            iframeWindow.removeEventListener("keyup", this.keyupListener, true);
+                        }
+                    } catch(e) {}
+                }
+                this.keyupListener = null;
+            }
+            this.activeObservers.forEach(observer => observer.disconnect());
+            this.activeObservers.clear();
+            // 🔧 注意: 不清除后备监听器，让它继续工作直到成功初始化
+            this.videoControlButtons.forEach(button => button.remove());
+            this.videoControlButtons.clear();
+            this.activeVideo = null;
         }
         
         async _findInitialVideo() {
@@ -744,11 +830,105 @@
                     return deepVideos[0];
                 }
             }
-            
+
             // 如果所有方法都找不到视频，则抛出错误
             throw { type: "no_video", message: "在页面上找不到任何视频元素。" };
         }
-        
+
+        /**
+         * 设置后备视频监听器
+         * 在初始化失败后持续监听 DOM，等待延迟加载的视频出现
+         */
+        _setupFallbackVideoObserver() {
+            // 如果已经有后备监听器在运行，不重复创建
+            if (this.fallbackVideoObserver) {
+                return;
+            }
+
+            console.log("设置后备视频监听器，等待延迟加载的视频...");
+
+            // 🔧 修复：检测有效视频的函数（不是任意视频）
+            const isValidVideo = (video) => {
+                const hasSrc = video.src || video.currentSrc;
+                const hasSize = video.offsetWidth > 0 || video.offsetHeight > 0;
+                const isLoaded = video.readyState >= 1;
+                return hasSrc || isLoaded || hasSize;
+            };
+
+            // 检测视频并初始化的函数
+            const checkAndInit = () => {
+                // 🔧 修复：查找有效的视频，而不是任意视频
+                const videos = document.querySelectorAll('video');
+                const validVideo = Array.from(videos).find(isValidVideo);
+
+                if (validVideo) {
+                    console.log("后备监听器检测到有效视频:", validVideo.className || validVideo.id,
+                        `(src:${!!(validVideo.src || validVideo.currentSrc)}, size:${validVideo.offsetWidth}x${validVideo.offsetHeight}, readyState:${validVideo.readyState})`);
+                    this._cleanupFallbackObserver();
+                    this.initialize().catch(console.error);
+                    return true;
+                }
+                return false;
+            };
+
+            // 方法1：MutationObserver 监听 DOM 变化
+            this.fallbackVideoObserver = new MutationObserver((mutations) => {
+                // 检查是否有新的 video 元素
+                let foundVideo = false;
+
+                for (const mutation of mutations) {
+                    for (const node of mutation.addedNodes) {
+                        if (node.tagName === 'VIDEO') {
+                            foundVideo = true;
+                            break;
+                        }
+                        if (node.querySelector && node.querySelector('video')) {
+                            foundVideo = true;
+                            break;
+                        }
+                    }
+                    if (foundVideo) break;
+                }
+
+                if (foundVideo) {
+                    checkAndInit();
+                }
+            });
+
+            this.fallbackVideoObserver.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+
+            // 方法2：定时轮询作为兜底（某些网站的视频加载方式可能无法被 MutationObserver 捕获）
+            this.fallbackPollingTimer = setInterval(() => {
+                if (checkAndInit()) {
+                    // 成功找到视频，清理定时器
+                    clearInterval(this.fallbackPollingTimer);
+                    this.fallbackPollingTimer = null;
+                }
+            }, 1000); // 每秒检查一次
+
+            // 立即检查一次当前页面是否有视频
+            if (checkAndInit()) {
+                return;
+            }
+        }
+
+        /**
+         * 清理后备监听器
+         */
+        _cleanupFallbackObserver() {
+            if (this.fallbackVideoObserver) {
+                this.fallbackVideoObserver.disconnect();
+                this.fallbackVideoObserver = null;
+            }
+            if (this.fallbackPollingTimer) {
+                clearInterval(this.fallbackPollingTimer);
+                this.fallbackPollingTimer = null;
+            }
+        }
+
         _setupPersistentObservers() {
             // 1. 合并 videoObserver 和 urlObserver, 并优化回调
             this.mainObserver = new MutationObserver((mutations) => {
@@ -849,6 +1029,7 @@
             }
             this.activeObservers.forEach(observer => observer.disconnect());
             this.activeObservers.clear();
+            this._cleanupFallbackObserver();
             this.videoControlButtons.forEach(button => button.remove());
             this.videoControlButtons.clear();
             this.activeVideo = null;
@@ -899,10 +1080,9 @@
                     if (iframeWindow && iframeWindow !== window) {
                         iframeWindow.addEventListener("keydown", this.keydownListener, true);
                         iframeWindow.addEventListener("keyup", this.keyupListener, true);
-                        console.log('✅ 已在 iframe 中设置键盘监听');
                     }
                 } catch(e) {
-                    console.warn('⚠️ 无法在 iframe 中设置监听器:', e.message);
+                    // 忽略跨域错误
                 }
             }
         }
@@ -934,18 +1114,28 @@
         }
         
         deepFindVideoElements() {
-            console.log('开始深度查找视频元素...');
             const foundVideos = new Set();
             const find = (element, depth = 0) => {
                 if (depth > 10) return;
-                if (element.tagName === 'VIDEO') foundVideos.add(element);
+                if (element.tagName === 'VIDEO') {
+                    foundVideos.add(element);
+                }
                 if (element.shadowRoot) find(element.shadowRoot, depth + 1);
                 if (element.contentDocument) find(element.contentDocument, depth + 1);
                 Array.from(element.children || []).forEach(child => find(child, depth + 1));
             };
             find(document.body);
-            console.log(`深度查找完成，共找到 ${foundVideos.size} 个视频元素`);
-            return Array.from(foundVideos);
+
+            // 过滤掉无效的视频元素
+            const validVideos = Array.from(foundVideos).filter(video => {
+                const hasSrc = video.src || video.currentSrc;
+                const hasSize = video.offsetWidth > 0 || video.offsetHeight > 0;
+                const isLoaded = video.readyState >= 1;
+                return hasSrc || isLoaded || hasSize;
+            });
+
+            console.log(`深度查找完成，共找到 ${validVideos.length} 个有效视频元素（原始 ${foundVideos.size} 个）`);
+            return validVideos.length > 0 ? validVideos : Array.from(foundVideos);
         }
         
         detectAndSetupVideos() {
@@ -957,6 +1147,7 @@
 
         findAllVideos() {
             const allVideos = new Set(document.querySelectorAll('video'));
+
             const findIn = (root) => {
                 try {
                     root.querySelectorAll('video').forEach(v => allVideos.add(v));
@@ -971,15 +1162,52 @@
                 } catch(e) {/* ignore */}
             };
             findIn(document);
-            return Array.from(allVideos);
+
+            // 过滤掉无效的视频元素（无 src、尺寸为 0、未加载）
+            const validVideos = Array.from(allVideos).filter(video => {
+                const hasSrc = video.src || video.currentSrc;
+                const hasSize = video.offsetWidth > 0 || video.offsetHeight > 0;
+                const isLoaded = video.readyState >= 1;
+                return hasSrc || isLoaded || hasSize;
+            });
+
+            // 如果过滤后没有有效视频，返回原始列表（兜底）
+            return validVideos.length > 0 ? validVideos : Array.from(allVideos);
+        }
+
+        /**
+         * 检查视频元素是否有效（可控制）
+         */
+        _isValidVideo(video) {
+            if (!video) return false;
+            const hasSrc = video.src || video.currentSrc;
+            const hasSize = video.offsetWidth > 0 || video.offsetHeight > 0;
+            const isLoaded = video.readyState >= 1;
+            return hasSrc || hasSize || isLoaded;
         }
 
         setupVideos(videos) {
+            // 检查当前 activeVideo 是否有效，如果无效则允许替换
+            const currentActiveValid = this._isValidVideo(this.activeVideo);
+
             if (videos.length === 1) {
                 const video = videos[0];
-                if (video.readyState >= 1 && !this.activeVideo) {
+                const videoIsValid = this._isValidVideo(video);
+
+                // 如果新视频有效，且（没有activeVideo 或 当前activeVideo无效），则替换
+                if (videoIsValid && (!this.activeVideo || !currentActiveValid)) {
                     this.activeVideo = video;
                     this.setDefaultRate(video);
+                } else if (!videoIsValid && (video.src || video.currentSrc)) {
+                    // 视频有 src 但还没加载好，监听 loadedmetadata
+                    const onLoaded = () => {
+                        video.removeEventListener('loadedmetadata', onLoaded);
+                        if (!this._isValidVideo(this.activeVideo)) {
+                            this.activeVideo = video;
+                            this.setDefaultRate(video);
+                        }
+                    };
+                    video.addEventListener('loadedmetadata', onLoaded);
                 }
             } else if (videos.length > 1) {
                 // 对于配置了特定规则的网站，进行主视频判断
@@ -1005,10 +1233,14 @@
                 } else {
                     // 其他网站，创建控制按钮
                     videos.forEach((video, index) => {
-                        if (!this.videoControlButtons.has(video) && video.readyState >= 1) {
+                        const videoIsValid = this._isValidVideo(video);
+                        if (!this.videoControlButtons.has(video) && videoIsValid) {
                             this.createVideoControlButton(video, index + 1);
                             this.setDefaultRate(video);
-                            if (!this.activeVideo) this.activeVideo = video;
+                            // 如果没有 activeVideo 或当前 activeVideo 无效，则设置
+                            if (!this.activeVideo || !this._isValidVideo(this.activeVideo)) {
+                                this.activeVideo = video;
+                            }
                         }
                     });
                 }
@@ -1242,16 +1474,29 @@
             }
 
             if (e.code === 'ArrowRight') {
+                // 防止重复处理 - 双重保险
+                // 1. 事件对象标记
+                if (e._videoControllerHandled) {
+                    return;
+                }
+                e._videoControllerHandled = true;
+
+                // 2. 全局标记
+                if (this._rightKeyUpHandled) {
+                    return;
+                }
+                this._rightKeyUpHandled = true;
+
                 clearTimeout(this.rightKeyTimer);
                 this.rightKeyTimer = null;
-                
+
                 if (this.downCount < this.config.SHORT_PRESS_MAX_COUNT) { //判定为短按
                     this.seek(this.config.SEEK_STEP_SECONDS);
                 } else { //判定为长按
-                     if(this.activeVideo) {
+                    if(this.activeVideo) {
                         this.activeVideo.playbackRate = this.originalRate;
                         showFloatingMessage(`恢复播放速度: ${this.originalRate.toFixed(1)}x`);
-                     }
+                    }
                 }
                 this.downCount = 0;
             }
@@ -1295,7 +1540,6 @@
             }
 
             // 通用备用方案：使用原生API
-            console.log('未找到特定网站的全屏按钮，使用原生API。');
             if (!document.fullscreenElement) {
                 if (this.activeVideo.requestFullscreen) {
                     this.activeVideo.requestFullscreen();
@@ -1337,6 +1581,9 @@
         handleRightArrowPress() {
             if (this.activeVideo.paused) this.activeVideo.play();
 
+            // 重置标记，允许新的KeyUp处理
+            this._rightKeyUpHandled = false;
+
             if (this.downCount === 0) {
                 this.originalRate = this.activeVideo.playbackRate;
                 this.rightKeyTimer = setTimeout(() => {
@@ -1355,6 +1602,11 @@
         }
         
         adjustPlaybackRate(delta) {
+            if (!this.activeVideo) {
+                showFloatingMessage('错误：未找到视频元素');
+                return;
+            }
+
             const newRate = Math.max(0.1, Math.min(this.config.MAX_RATE, this.activeVideo.playbackRate + delta));
             this.activeVideo.playbackRate = newRate;
             this.lastManualRateChangeTime = Date.now();
