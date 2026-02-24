@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.6.2
+// @version      1.6.3
 // @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
 // @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
 // @author       ternece
@@ -1621,6 +1621,11 @@
             // 允许响应长按重复的按键：音量调节(上/下箭头)、右箭头(有自己的长按逻辑)
             const allowRepeatKeys = ['ArrowUp', 'ArrowDown', 'ArrowRight'];
             if (e.repeat && !allowRepeatKeys.includes(e.code)) {
+                // 对于脚本管理的按键，长按时仍需拦截，防止穿透到网站原生快捷键（如B站 [ ] 上/下P）
+                if (this.activeVideo && this.keyHandlers[e.code]) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                }
                 return;
             }
 
