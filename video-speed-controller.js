@@ -2,9 +2,9 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.6.4
-// @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
-// @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
+// @version      1.6.5
+// @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，Shift+上/下箭头 音量增强（超过100%），回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
+// @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Shift+Up/Down for volume boost (beyond 100%), Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
 // @author       ternece
 // @license      MIT
 // @match        *://*.youtube.com/*
@@ -28,7 +28,9 @@
         targetRate: 2.5,     // 长按右键时的倍速
         quickRateStep: 0.5,  // 按[]键调整速度的步长
         targetRateStep: 0.5, // 按 +/- 键调整目标倍速的步长
-        logLevel: 2          // 默认日志级别 (WARN)
+        logLevel: 2,         // 默认日志级别 (WARN)
+        volumeBoostMax: 4.0, // 音量增强倍率上限
+        volumeBoostStep: 0.1 // 音量增强调整步长
     };
 
     // 通用配置
@@ -45,7 +47,8 @@
 
         // 数值限制
         MAX_RATE: 16,                   // 最大允许的播放速度
-        MAX_QUICK_RATE_STEP: 3          // “快速调速步长”的最大值
+        MAX_QUICK_RATE_STEP: 3,         // "快速调速步长"的最大值
+        VOLUME_BOOST_MIN: 1.0           // 音量增强最小值（即原始音量）
     };
 
     // 特定网站的配置
@@ -459,7 +462,9 @@
                 defaultRate: GM_getValue('defaultRate', DEFAULT_SETTINGS.defaultRate),
                 targetRate: GM_getValue('targetRate', DEFAULT_SETTINGS.targetRate),
                 quickRateStep: GM_getValue('quickRateStep', DEFAULT_SETTINGS.quickRateStep),
-                targetRateStep: GM_getValue('targetRateStep', DEFAULT_SETTINGS.targetRateStep)
+                targetRateStep: GM_getValue('targetRateStep', DEFAULT_SETTINGS.targetRateStep),
+                volumeBoostMax: GM_getValue('volumeBoostMax', DEFAULT_SETTINGS.volumeBoostMax),
+                volumeBoostStep: GM_getValue('volumeBoostStep', DEFAULT_SETTINGS.volumeBoostStep)
             };
             // 使用分组数据结构：主域名 -> 包含的iframe域名
             this.tempEnabledDomainGroups = GM_getValue('tempEnabledDomainGroups', []);
@@ -498,6 +503,12 @@
 
             // Bug6 修复：长按判定时间戳
             this._rightKeyDownTime = 0;
+
+            // 音量增强 (Web Audio API)
+            this._audioContext = null;
+            this._audioNodes = new WeakMap();
+            this._currentBoostLevel = 1.0;
+            this._boostWarningShown = false;
 
             // 创建防抖版的视频检测函数
             this.debouncedDetectAndSetupVideos = debounce(this.detectAndSetupVideos.bind(this), 500);
@@ -777,6 +788,8 @@
             GM_registerMenuCommand('设置长按右键倍速', () => this.updateSetting('targetRate', `请输入长按右键时的倍速 (0.1-${this.config.MAX_RATE})`));
             GM_registerMenuCommand('设置快速调速步长', () => this.updateSetting('quickRateStep', `请输入按 [ 或 ] 键调整速度的步长 (0.1-${this.config.MAX_QUICK_RATE_STEP})`, this.config.MAX_QUICK_RATE_STEP));
             GM_registerMenuCommand('设置目标倍速调整步长', () => this.updateSetting('targetRateStep', `请输入按 +/- 键调整目标倍速的步长 (0.1-${this.config.MAX_RATE})`));
+            GM_registerMenuCommand('设置音量增强上限', () => this.updateSetting('volumeBoostMax', '请输入音量增强倍率上限 (1.0-4.0)', 4.0, 1.0));
+            GM_registerMenuCommand('设置音量增强步长', () => this.updateSetting('volumeBoostStep', '请输入音量增强步长 (0.05-0.5)', 0.5, 0.05));
 
             // 如果当前网站是临时启用的，则提供"移除"选项
             const currentGroup = this.tempEnabledDomainGroups.find(g => g.mainDomain === this.currentDomain);
@@ -788,11 +801,11 @@
             }
         }
         
-        updateSetting(key, promptMessage, max = this.config.MAX_RATE) {
+        updateSetting(key, promptMessage, max = this.config.MAX_RATE, min = 0.1) {
             const newValue = prompt(promptMessage, this.settings[key]);
             if (newValue !== null) {
                 const value = parseFloat(newValue);
-                if (!isNaN(value) && value >= 0.1 && value <= max) {
+                if (!isNaN(value) && value >= min && value <= max) {
                     this.settings[key] = value;
                     GM_setValue(key, value);
                     showFloatingMessage(`设置已更新: ${value}`);
@@ -807,7 +820,7 @@
                     }
                 } else {
                     // 使用浮动消息替代 alert
-                    showFloatingMessage(`设置失败: 请输入有效的值 (0.1-${max})`);
+                    showFloatingMessage(`设置失败: 请输入有效的值 (${min}-${max})`);
                 }
             }
         }
@@ -915,9 +928,10 @@
             this._videoControlButtonsList.forEach(button => button.remove());
             this._videoControlButtonsList.clear();
             this.videoControlButtons = new WeakMap();
+            this._cleanupAllAudioNodes();
             this.activeVideo = null;
         }
-        
+
         async _findInitialVideo() {
             try {
                 // 尝试用快速方法找到视频
@@ -1069,6 +1083,7 @@
                                  this._videoControlButtonsList.delete(button);
                              }
                              // WeakMap 条目会随视频 GC 自动清理，但主动删除更及时
+                             this._disconnectAudioNodes(video);
                              if (this.activeVideo === video) {
                                  this.activeVideo = null;
                              }
@@ -1159,6 +1174,7 @@
             this._videoControlButtonsList.forEach(button => button.remove());
             this._videoControlButtonsList.clear();
             this.videoControlButtons = new WeakMap();
+            this._cleanupAllAudioNodes();
             this.activeVideo = null;
         }
 
@@ -1570,6 +1586,9 @@
             // 切换活动视频
             this.activeVideo = video;
 
+            // 应用当前音量增强倍率到新视频
+            this._applyBoostToActiveVideo();
+
             // 显示提示消息
             showFloatingMessage('已切换到该视频控制');
         }
@@ -1640,6 +1659,15 @@
             };
             const isInputFocused = path.some(isInteractiveElement);
             if (isInputFocused || !this.activeVideo) {
+                return;
+            }
+
+            // Shift 组合键：音量增强（Shift + 上/下箭头）
+            if (e.shiftKey && (e.code === 'ArrowUp' || e.code === 'ArrowDown')) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                const step = this.settings.volumeBoostStep;
+                this.adjustVolumeBoost(e.code === 'ArrowUp' ? step : -step);
                 return;
             }
 
@@ -1715,6 +1743,154 @@
         }
 
         // 移除了 _handle... 系列的中间函数，因为它们已被 .bind 替代
+
+        // ===== 音量增强 (Web Audio API) =====
+
+        async _getOrCreateAudioNodes(video) {
+            if (this._audioNodes.has(video)) {
+                return this._audioNodes.get(video);
+            }
+
+            // 跨域检测：如果视频跨域且未设置 crossOrigin，createMediaElementSource 会导致静音
+            try {
+                const videoUrl = new URL(video.currentSrc || video.src, document.baseURI);
+                if (videoUrl.origin !== window.location.origin && !video.crossOrigin) {
+                    Logger.warn("跨域视频未设置 crossOrigin 属性，音量增强不可用");
+                    return null;
+                }
+            } catch (e) {
+                // URL 解析失败，保守处理：禁止创建节点以避免静音
+                Logger.warn("无法解析视频 URL，跳过音量增强");
+                return null;
+            }
+
+            if (!this._audioContext) {
+                try {
+                    this._audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                } catch (e) {
+                    Logger.error("创建 AudioContext 失败:", e);
+                    return null;
+                }
+            }
+
+            // 确保 AudioContext 处于运行状态
+            if (this._audioContext.state === 'suspended') {
+                try {
+                    await this._audioContext.resume();
+                } catch (e) {
+                    Logger.warn("无法恢复 AudioContext:", e);
+                }
+            }
+
+            try {
+                const source = this._audioContext.createMediaElementSource(video);
+                const gain = this._audioContext.createGain();
+                gain.gain.value = this._currentBoostLevel;
+                source.connect(gain);
+                gain.connect(this._audioContext.destination);
+
+                const nodes = { source, gain };
+                this._audioNodes.set(video, nodes);
+                Logger.debug("已为视频创建音频增强节点");
+                return nodes;
+            } catch (e) {
+                if (e.name === 'InvalidStateError') {
+                    Logger.warn("无法为视频创建音频源节点（已被占用）:", e.message);
+                } else {
+                    Logger.error("创建音频增强节点失败:", e);
+                }
+                return null;
+            }
+        }
+
+        _disconnectAudioNodes(video) {
+            if (this._audioNodes.has(video)) {
+                const nodes = this._audioNodes.get(video);
+                try {
+                    nodes.gain.disconnect();
+                    nodes.source.disconnect();
+                } catch (e) {
+                    Logger.debug("断开音频节点时出错（可忽略）:", e);
+                }
+                this._audioNodes.delete(video);
+                Logger.debug("已清理视频的音频增强节点");
+            }
+        }
+
+        _cleanupAllAudioNodes() {
+            if (this._audioContext) {
+                try {
+                    this._audioContext.close();
+                } catch (e) {
+                    Logger.debug("关闭 AudioContext 时出错:", e);
+                }
+                this._audioContext = null;
+            }
+            this._audioNodes = new WeakMap();
+            this._currentBoostLevel = this.config.VOLUME_BOOST_MIN;
+        }
+
+        async _applyBoostToActiveVideo() {
+            if (!this.activeVideo || this._currentBoostLevel <= this.config.VOLUME_BOOST_MIN) {
+                return;
+            }
+            // 如果新视频音量不满，重置增强而非强制应用
+            if (this.activeVideo.volume < 0.999) {
+                this._currentBoostLevel = this.config.VOLUME_BOOST_MIN;
+                Logger.debug("新视频音量未满，已重置音量增强");
+                return;
+            }
+            const nodes = await this._getOrCreateAudioNodes(this.activeVideo);
+            if (nodes) {
+                nodes.gain.gain.value = this._currentBoostLevel;
+            }
+        }
+
+        async adjustVolumeBoost(delta) {
+            if (!this.activeVideo) return;
+
+            // 增大时要求音量已满（用 epsilon 避免浮点精度问题）
+            if (delta > 0 && this.activeVideo.volume < 0.999) {
+                showFloatingMessage('请先将音量调至100%（按↑键）');
+                return;
+            }
+
+            // 已在最小值时不再减小
+            if (delta < 0 && this._currentBoostLevel <= this.config.VOLUME_BOOST_MIN) {
+                return;
+            }
+
+            const nodes = await this._getOrCreateAudioNodes(this.activeVideo);
+            if (!nodes) {
+                showFloatingMessage('音量增强不可用（跨域限制或音频节点创建失败）');
+                return;
+            }
+
+            // 首次激活时显示安全提示（在确认节点可用后再提示）
+            if (delta > 0 && this._currentBoostLevel <= this.config.VOLUME_BOOST_MIN && !this._boostWarningShown) {
+                this._boostWarningShown = true;
+                showFloatingMessage('音量增强已开启，注意保护听力！Shift + ↓ 可降低，降至100%即关闭');
+            }
+
+            const newLevel = Math.max(
+                this.config.VOLUME_BOOST_MIN,
+                Math.min(this.settings.volumeBoostMax, this._currentBoostLevel + delta)
+            );
+
+            // 使用 toFixed 避免浮点累积误差
+            const roundedLevel = Math.round(newLevel * 100) / 100;
+
+            if (roundedLevel !== this._currentBoostLevel) {
+                this._currentBoostLevel = roundedLevel;
+                nodes.gain.gain.value = this._currentBoostLevel;
+            }
+
+            if (this._currentBoostLevel <= this.config.VOLUME_BOOST_MIN) {
+                showFloatingMessage('音量增强：已关闭');
+            } else {
+                showFloatingMessage(`音量增强：${Math.round(this._currentBoostLevel * 100)}%`);
+            }
+        }
 
         adjustVolume(delta) {
             if (!this.activeVideo) return; // Bug3 扩展修复：空引用保护
