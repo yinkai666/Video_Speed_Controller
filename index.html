@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>视频倍速播放增强版 - Enhanced Video Speed Controller</title>
+<meta name="description" content="一个强大的浏览器油猴脚本，为任意视频网站提供精确的倍速控制、音量增强、快捷键操作。支持 YouTube、Bilibili 等主流平台。">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --text-primary: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-tertiary: #86868b;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f7;
+  --bg-tertiary: #fbfbfd;
+  --border: #d2d2d7;
+  --kbd-bg: #f0f0f3;
+  --kbd-border: #c8c8cc;
+  --kbd-shadow: #b8b8bc;
+  --radius: 12px;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+html { scroll-behavior: smooth; -webkit-font-smoothing: antialiased; }
+
+body {
+  font-family: var(--font);
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---- Nav ---- */
+.nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  height: 52px;
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 clamp(20px, 4vw, 80px);
+}
+.nav-brand {
+  font-size: 15px; font-weight: 600; color: var(--text-primary);
+  display: flex; align-items: center; gap: 8px;
+}
+.nav-brand svg { flex-shrink: 0; }
+.nav-links { display: flex; gap: 28px; font-size: 13px; }
+.nav-links a { color: var(--text-secondary); transition: color 0.2s; }
+.nav-links a:hover { color: var(--text-primary); text-decoration: none; }
+.nav-github {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--text-secondary); font-size: 13px; transition: color 0.2s;
+}
+.nav-github:hover { color: var(--text-primary); text-decoration: none; }
+
+/* ---- Hero ---- */
+.hero {
+  min-height: calc(100svh - 52px);
+  margin-top: 52px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center;
+  padding: 80px clamp(20px, 5vw, 80px) 60px;
+  position: relative;
+  overflow: hidden;
+}
+.hero::before {
+  content: '';
+  position: absolute; top: -40%; left: 50%; transform: translateX(-50%);
+  width: 800px; height: 800px;
+  background: radial-gradient(circle, rgba(0,113,227,0.06) 0%, transparent 70%);
+  pointer-events: none;
+}
+.hero-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px;
+  font-size: 13px; font-weight: 500;
+  color: var(--accent);
+  background: rgba(0,113,227,0.06);
+  border-radius: 100px;
+  margin-bottom: 28px;
+}
+.hero h1 {
+  font-size: clamp(40px, 7vw, 72px);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.08;
+  margin-bottom: 20px;
+}
+.hero-desc {
+  font-size: clamp(17px, 2.2vw, 21px);
+  color: var(--text-secondary);
+  max-width: 600px;
+  line-height: 1.5;
+  margin-bottom: 40px;
+}
+.hero-actions { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
+.btn-primary {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 14px 32px;
+  font-size: 16px; font-weight: 500;
+  color: #fff; background: var(--accent);
+  border: none; border-radius: 100px; cursor: pointer;
+  transition: background 0.2s, transform 0.15s;
+  text-decoration: none;
+}
+.btn-primary:hover { background: var(--accent-hover); transform: scale(1.02); text-decoration: none; }
+.btn-secondary {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 14px 32px;
+  font-size: 16px; font-weight: 500;
+  color: var(--accent); background: transparent;
+  border: 1.5px solid var(--border);
+  border-radius: 100px; cursor: pointer;
+  transition: border-color 0.2s, transform 0.15s;
+  text-decoration: none;
+}
+.btn-secondary:hover { border-color: var(--accent); transform: scale(1.02); text-decoration: none; }
+
+/* Speed animation */
+.speed-display {
+  margin-top: 56px;
+  font-size: clamp(80px, 14vw, 160px);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: var(--text-primary);
+  opacity: 0.08;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  transition: opacity 0.5s, transform 0.5s cubic-bezier(0.23, 1, 0.32, 1);
+}
+.speed-display.pulse {
+  opacity: 0.14;
+  transform: scale(1.04);
+}
+
+/* ---- Hero entrance ---- */
+.hero-badge, .hero h1, .hero-desc, .hero-actions, .speed-display {
+  opacity: 0;
+  transform: translateY(30px);
+  animation: heroIn 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+}
+.hero-badge   { animation-delay: 0.1s; }
+.hero h1      { animation-delay: 0.25s; }
+.hero-desc    { animation-delay: 0.4s; }
+.hero-actions { animation-delay: 0.55s; }
+.speed-display { animation-delay: 0.7s; opacity: 0; }
+@keyframes heroIn {
+  to { opacity: 1; transform: translateY(0); }
+}
+/* Speed display stays at low opacity after entrance */
+.speed-display.entered { opacity: 0.08; transform: translateY(0); }
+.speed-display.entered.pulse { opacity: 0.14; transform: scale(1.04); }
+
+/* ---- Section common ---- */
+.section {
+  padding: 100px clamp(20px, 5vw, 80px);
+  max-width: 1120px;
+  margin: 0 auto;
+}
+.section-alt { background: var(--bg-secondary); }
+.section-alt .section { padding-top: 100px; padding-bottom: 100px; }
+.section-label {
+  font-size: 14px; font-weight: 600; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 12px;
+}
+.section-title {
+  font-size: clamp(28px, 4vw, 44px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  margin-bottom: 16px;
+}
+.section-subtitle {
+  font-size: 17px;
+  color: var(--text-secondary);
+  max-width: 560px;
+  line-height: 1.5;
+  margin-bottom: 56px;
+}
+
+/* ---- Features ---- */
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 48px 40px;
+}
+.feature-item { max-width: 320px; }
+.feature-icon {
+  width: 48px; height: 48px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,113,227,0.08);
+  border-radius: 12px;
+  margin-bottom: 20px;
+  color: var(--accent);
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.3s;
+}
+.feature-item:hover .feature-icon {
+  transform: translateY(-4px) scale(1.08);
+  background: rgba(0,113,227,0.14);
+}
+.feature-item h3 {
+  font-size: 19px; font-weight: 600;
+  margin-bottom: 8px;
+}
+.feature-item p {
+  font-size: 15px; color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+/* ---- Shortcuts ---- */
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 48px 56px;
+}
+.shortcut-group h3 {
+  font-size: 16px; font-weight: 600;
+  color: var(--text-primary);
+  padding-bottom: 14px;
+  border-bottom: 1.5px solid var(--border);
+  margin-bottom: 18px;
+}
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  font-size: 14px;
+  transition: background 0.15s;
+  border-radius: 6px;
+}
+.shortcut-row:hover {
+  background: rgba(0,113,227,0.03);
+  padding-left: 8px; padding-right: 8px;
+  margin-left: -8px; margin-right: -8px;
+}
+.shortcut-keys { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.shortcut-desc { color: var(--text-secondary); }
+kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 28px; height: 26px;
+  padding: 0 8px;
+  font-family: var(--font);
+  font-size: 12px; font-weight: 500;
+  color: var(--text-primary);
+  background: var(--kbd-bg);
+  border: 1px solid var(--kbd-border);
+  border-radius: 6px;
+  box-shadow: 0 1px 0 var(--kbd-shadow);
+  transition: transform 0.15s, box-shadow 0.15s, background 0.15s;
+}
+.shortcut-row:hover kbd {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 0 var(--kbd-shadow);
+  background: #e8e8ec;
+}
+.shortcut-row:active kbd {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+.key-plus { font-size: 11px; color: var(--text-tertiary); font-weight: 500; }
+
+/* ---- Install ---- */
+.install-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 40px;
+  counter-reset: step;
+}
+.install-step {
+  position: relative;
+  padding-left: 0;
+}
+.step-number {
+  display: flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px;
+  font-size: 18px; font-weight: 700;
+  color: var(--accent);
+  background: rgba(0,113,227,0.08);
+  border-radius: 50%;
+  margin-bottom: 20px;
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.3s;
+}
+.install-step:hover .step-number {
+  transform: scale(1.15);
+  background: rgba(0,113,227,0.16);
+}
+.install-step h3 {
+  font-size: 18px; font-weight: 600;
+  margin-bottom: 8px;
+}
+.install-step p {
+  font-size: 15px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+.install-step a { font-weight: 500; }
+
+/* ---- Footer ---- */
+.footer {
+  padding: 40px clamp(20px, 5vw, 80px);
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  border-top: 1px solid rgba(0,0,0,0.06);
+}
+.footer-links {
+  display: flex; justify-content: center; gap: 24px;
+  margin-bottom: 12px;
+}
+.footer-links a { color: var(--text-secondary); font-size: 13px; }
+.footer-links a:hover { color: var(--text-primary); }
+
+/* ---- Scroll reveal ---- */
+.reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.7s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              transform 0.7s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ---- Scroll-linked parallax for hero ---- */
+.hero-parallax {
+  transition: none;
+}
+
+/* ---- Nav scroll state ---- */
+.nav.scrolled {
+  background: rgba(255,255,255,0.92);
+  box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+}
+
+/* ---- Button ripple ---- */
+.btn-primary, .btn-secondary {
+  position: relative; overflow: hidden;
+}
+.btn-ripple {
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.3);
+  transform: scale(0);
+  animation: ripple 0.6s ease-out forwards;
+  pointer-events: none;
+}
+.btn-secondary .btn-ripple { background: rgba(0,113,227,0.1); }
+@keyframes ripple {
+  to { transform: scale(4); opacity: 0; }
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 768px) {
+  .nav-links { display: none; }
+  .hero { min-height: auto; padding-top: 100px; padding-bottom: 60px; }
+  .speed-display { margin-top: 40px; }
+  .section { padding: 72px clamp(20px, 5vw, 40px); }
+  .section-alt .section { padding-top: 72px; padding-bottom: 72px; }
+  .shortcuts-grid { gap: 40px 32px; }
+  .shortcut-row:hover { padding-left: 0; padding-right: 0; margin-left: 0; margin-right: 0; }
+}
+
+@media (max-width: 480px) {
+  .hero-actions { flex-direction: column; align-items: center; }
+  .btn-primary, .btn-secondary { width: 100%; max-width: 300px; justify-content: center; }
+}
+</style>
+</head>
+<body>
+
+<!-- Nav -->
+<nav class="nav">
+  <div class="nav-brand">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="5 3 19 12 5 21 5 3"/>
+    </svg>
+    视频倍速控制器
+  </div>
+  <div class="nav-links">
+    <a href="#features">功能</a>
+    <a href="#shortcuts">快捷键</a>
+    <a href="#install">安装</a>
+  </div>
+  <a class="nav-github" href="https://github.com/yinkai666/Video_Speed_Controller" target="_blank" rel="noopener">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+    GitHub
+  </a>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-badge">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>
+    v1.6.5
+  </div>
+  <h1>视频倍速播放<br>增强版</h1>
+  <p class="hero-desc">为任意视频网站赋予精确的速度控制、音量增强和丰富的快捷键操作。<br>支持 YouTube、Bilibili 等主流平台。</p>
+  <div class="hero-actions">
+    <a class="btn-primary" href="https://greasyfork.org/zh-CN/scripts/525065" target="_blank" rel="noopener">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      安装脚本
+    </a>
+    <a class="btn-secondary" href="https://github.com/yinkai666/Video_Speed_Controller" target="_blank" rel="noopener">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0020 4.77 5.07 5.07 0 0019.91 1S18.73.65 16 2.48a13.38 13.38 0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 005 4.77a5.44 5.44 0 00-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 009 18.13V22"/></svg>
+      查看源码
+    </a>
+  </div>
+  <div class="speed-display" id="speedDisplay">1.0x</div>
+</section>
+
+<!-- Features -->
+<div class="section-alt">
+  <section class="section" id="features">
+    <div class="reveal">
+      <p class="section-label">功能</p>
+      <h2 class="section-title">你需要的，都在这里</h2>
+      <p class="section-subtitle">从精确的倍速控制到音量增强，一个脚本覆盖所有视频控制需求。</p>
+    </div>
+    <div class="features-grid">
+      <div class="feature-item reveal">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </div>
+        <h3>精确倍速控制</h3>
+        <p>长按右箭头即时加速，松开恢复。用 [ ] 键微调速度，支持 0.1x 到 16x 无级变速。</p>
+      </div>
+      <div class="feature-item reveal">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14"/><path d="M15.54 8.46a5 5 0 010 7.07"/></svg>
+        </div>
+        <h3>音量增强</h3>
+        <p>突破浏览器 100% 音量上限，最高可达 400%。基于 Web Audio API，还原清晰音质。</p>
+      </div>
+      <div class="feature-item reveal">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+        </div>
+        <h3>全站兼容</h3>
+        <p>内置 YouTube、Bilibili 深度适配。其他任意视频网站，一键启用即可使用。</p>
+      </div>
+      <div class="feature-item reveal">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        </div>
+        <h3>智能检测</h3>
+        <p>自动发现页面中的 iframe 嵌套视频和 Shadow DOM，深度遍历确保不遗漏任何播放器。</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Shortcuts -->
+<section class="section" id="shortcuts">
+  <div class="reveal">
+    <p class="section-label">快捷键</p>
+    <h2 class="section-title">键盘掌控一切</h2>
+    <p class="section-subtitle">无需鼠标，全键盘操作。所有快捷键均可在设置中自定义步长。</p>
+  </div>
+  <div class="shortcuts-grid">
+    <div class="shortcut-group reveal">
+      <h3>速度控制</h3>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">长按加速播放</span>
+        <span class="shortcut-keys"><kbd>→</kbd><span class="key-plus">长按</span></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">加快当前速度</span>
+        <span class="shortcut-keys"><kbd>]</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">减慢当前速度</span>
+        <span class="shortcut-keys"><kbd>[</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">提高目标倍速</span>
+        <span class="shortcut-keys"><kbd>+</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">降低目标倍速</span>
+        <span class="shortcut-keys"><kbd>-</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">恢复默认速度</span>
+        <span class="shortcut-keys"><kbd>P</kbd></span>
+      </div>
+    </div>
+    <div class="shortcut-group reveal">
+      <h3>音量控制</h3>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">增大音量</span>
+        <span class="shortcut-keys"><kbd>↑</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">减小音量</span>
+        <span class="shortcut-keys"><kbd>↓</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">音量增强（超100%）</span>
+        <span class="shortcut-keys"><kbd>Shift</kbd><span class="key-plus">+</span><kbd>↑</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">降低音量增强</span>
+        <span class="shortcut-keys"><kbd>Shift</kbd><span class="key-plus">+</span><kbd>↓</kbd></span>
+      </div>
+    </div>
+    <div class="shortcut-group reveal">
+      <h3>播放控制</h3>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">播放 / 暂停</span>
+        <span class="shortcut-keys"><kbd>Space</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">切换全屏</span>
+        <span class="shortcut-keys"><kbd>Enter</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">快进 5 秒</span>
+        <span class="shortcut-keys"><kbd>→</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">快退 5 秒</span>
+        <span class="shortcut-keys"><kbd>←</kbd></span>
+      </div>
+    </div>
+    <div class="shortcut-group reveal">
+      <h3>逐帧操作</h3>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">上一帧</span>
+        <span class="shortcut-keys"><kbd>,</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">下一帧</span>
+        <span class="shortcut-keys"><kbd>.</kbd></span>
+      </div>
+      <div class="shortcut-row" style="padding-top: 18px; border-top: 1px solid var(--border); margin-top: 8px;">
+        <span class="shortcut-desc" style="color: var(--text-tertiary); font-size: 13px;">仅在暂停时可用</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Install -->
+<div class="section-alt">
+  <section class="section" id="install">
+    <div class="reveal">
+      <p class="section-label">安装</p>
+      <h2 class="section-title">三步开始使用</h2>
+      <p class="section-subtitle">简单几步，即刻为你的浏览器解锁完整的视频控制能力。</p>
+    </div>
+    <div class="install-steps">
+      <div class="install-step reveal">
+        <div class="step-number">1</div>
+        <h3>安装 Tampermonkey</h3>
+        <p>前往浏览器扩展商店，安装 <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> 油猴扩展。支持 Chrome、Firefox、Edge、Safari 等主流浏览器。</p>
+      </div>
+      <div class="install-step reveal">
+        <div class="step-number">2</div>
+        <h3>安装脚本</h3>
+        <p>前往 <a href="https://greasyfork.org/zh-CN/scripts/525065" target="_blank" rel="noopener">Greasy Fork 脚本页面</a>，点击"安装此脚本"按钮，在弹出的确认窗口中点击安装。</p>
+      </div>
+      <div class="install-step reveal">
+        <div class="step-number">3</div>
+        <h3>开始使用</h3>
+        <p>打开任意 YouTube 或 Bilibili 视频页面，快捷键即刻生效。其他网站通过油猴菜单一键启用。</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Footer -->
+<footer class="footer">
+  <div class="footer-links">
+    <a href="https://greasyfork.org/zh-CN/scripts/525065" target="_blank" rel="noopener">Greasy Fork</a>
+    <a href="https://github.com/yinkai666/Video_Speed_Controller" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/yinkai666/Video_Speed_Controller/issues" target="_blank" rel="noopener">反馈问题</a>
+  </div>
+  <p>v1.6.5 &middot; MIT License &middot; Made by ternece</p>
+</footer>
+
+<script>
+// Speed animation with pulse effect
+(function() {
+  const el = document.getElementById('speedDisplay');
+  if (!el) return;
+  const speeds = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 2.5, 2.0, 1.5, 1.0];
+  let i = 0;
+  // Mark as entered after hero animation completes
+  setTimeout(() => el.classList.add('entered'), 1500);
+  function tick() {
+    el.textContent = speeds[i].toFixed(speeds[i] % 1 === 0 ? 1 : speeds[i] % 0.5 === 0 ? 1 : 2) + 'x';
+    el.classList.add('pulse');
+    setTimeout(() => el.classList.remove('pulse'), 400);
+    i = (i + 1) % speeds.length;
+  }
+  setInterval(tick, 800);
+})();
+
+// Scroll reveal with stagger
+(function() {
+  const els = document.querySelectorAll('.reveal');
+  if (!('IntersectionObserver' in window)) {
+    els.forEach(el => el.classList.add('visible'));
+    return;
+  }
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        const parent = entry.target.parentElement;
+        const siblings = parent ? Array.from(parent.querySelectorAll(':scope > .reveal')) : [];
+        const sibIdx = siblings.indexOf(entry.target);
+        const delay = sibIdx > 0 ? sibIdx * 100 : 0;
+        setTimeout(() => entry.target.classList.add('visible'), delay);
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.15, rootMargin: '0px 0px -40px 0px' });
+  els.forEach(el => observer.observe(el));
+})();
+
+// Hero parallax on scroll
+(function() {
+  const hero = document.querySelector('.hero');
+  const badge = hero.querySelector('.hero-badge');
+  const h1 = hero.querySelector('h1');
+  const desc = hero.querySelector('.hero-desc');
+  const actions = hero.querySelector('.hero-actions');
+  const speed = document.getElementById('speedDisplay');
+  let ticking = false;
+
+  window.addEventListener('scroll', () => {
+    if (!ticking) {
+      requestAnimationFrame(() => {
+        const y = window.scrollY;
+        const max = window.innerHeight;
+        if (y < max) {
+          const ratio = y / max;
+          const opacity = 1 - ratio * 1.2;
+          const lift = y * 0.3;
+          badge.style.transform = `translateY(${lift * 0.5}px)`;
+          badge.style.opacity = Math.max(0, opacity);
+          h1.style.transform = `translateY(${lift * 0.4}px)`;
+          h1.style.opacity = Math.max(0, opacity);
+          desc.style.transform = `translateY(${lift * 0.25}px)`;
+          desc.style.opacity = Math.max(0, opacity + 0.1);
+          actions.style.transform = `translateY(${lift * 0.15}px)`;
+          actions.style.opacity = Math.max(0, opacity + 0.2);
+          speed.style.transform = `translateY(${-lift * 0.1}px) scale(${1 + ratio * 0.15})`;
+        }
+        ticking = false;
+      });
+      ticking = true;
+    }
+  }, { passive: true });
+})();
+
+// Nav scroll effect
+(function() {
+  const nav = document.querySelector('.nav');
+  let ticking = false;
+  window.addEventListener('scroll', () => {
+    if (!ticking) {
+      requestAnimationFrame(() => {
+        nav.classList.toggle('scrolled', window.scrollY > 20);
+        ticking = false;
+      });
+      ticking = true;
+    }
+  }, { passive: true });
+})();
+
+// Button ripple effect
+document.querySelectorAll('.btn-primary, .btn-secondary').forEach(btn => {
+  btn.addEventListener('click', function(e) {
+    const ripple = document.createElement('span');
+    ripple.classList.add('btn-ripple');
+    const rect = this.getBoundingClientRect();
+    const size = Math.max(rect.width, rect.height);
+    ripple.style.width = ripple.style.height = size + 'px';
+    ripple.style.left = (e.clientX - rect.left - size / 2) + 'px';
+    ripple.style.top = (e.clientY - rect.top - size / 2) + 'px';
+    this.appendChild(ripple);
+    ripple.addEventListener('animationend', () => ripple.remove());
+  });
+});
+
+// Smooth scroll for nav links
+document.querySelectorAll('.nav-links a[href^="#"]').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    const target = document.querySelector(a.getAttribute('href'));
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
+</script>
+
+</body>
+</html>
