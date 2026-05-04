@@ -2,9 +2,9 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.6.7
-// @description  长按右方向键倍速播放，松开恢复原速。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，Shift+上/下箭头 音量增强（超过100%），回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
-// @description:en  Hold right arrow key for speed playback, release to restore. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Shift+Up/Down for volume boost (beyond 100%), Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
+// @version      1.6.8
+// @description  长按右方向键倍速播放，松开恢复原速。支持旋转/镜像当前视频。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，Shift+上/下箭头 音量增强（超过100%），回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
+// @description:en  Hold right arrow key for speed playback, release to restore. Rotate/mirror the active video. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Shift+Up/Down for volume boost (beyond 100%), Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
 // @author       ternece
 // @license      MIT
 // @match        *://*.youtube.com/*
@@ -34,6 +34,96 @@
         volumeBoostStep: 0.1 // 音量增强调整步长
     };
 
+    // 视频方向控制使用页面级临时状态，不写入 GM_setValue。
+    const DEFAULT_VIDEO_TRANSFORM_STATE = Object.freeze({
+        rotation: 0,
+        mirrorX: false,
+        mirrorY: false
+    });
+
+    function createDefaultVideoTransformState() {
+        return { ...DEFAULT_VIDEO_TRANSFORM_STATE };
+    }
+
+    function normalizeVideoRotation(rotation) {
+        const numericRotation = Number(rotation);
+        if (!Number.isFinite(numericRotation)) {
+            return DEFAULT_VIDEO_TRANSFORM_STATE.rotation;
+        }
+        return ((numericRotation % 360) + 360) % 360;
+    }
+
+    function isDefaultVideoTransformState(state) {
+        return normalizeVideoRotation(state?.rotation) === DEFAULT_VIDEO_TRANSFORM_STATE.rotation &&
+               !state?.mirrorX &&
+               !state?.mirrorY;
+    }
+
+    function formatTransformScale(scale) {
+        const rounded = Math.round(scale * 10000) / 10000;
+        return Number.isInteger(rounded) ? String(rounded) : String(rounded).replace(/0+$/, '').replace(/\.$/, '');
+    }
+
+    function getElementLayoutSize(element) {
+        if (!element) {
+            return { width: 0, height: 0 };
+        }
+
+        const rect = typeof element.getBoundingClientRect === 'function'
+            ? element.getBoundingClientRect()
+            : { width: 0, height: 0 };
+
+        return {
+            width: element.clientWidth || element.offsetWidth || rect.width || 0,
+            height: element.clientHeight || element.offsetHeight || rect.height || 0
+        };
+    }
+
+    function calculateQuarterTurnScale(video, state, siteConfig = {}) {
+        const rotation = normalizeVideoRotation(state?.rotation);
+        if (siteConfig.disableQuarterTurnScale || (rotation !== 90 && rotation !== 270)) {
+            return 1;
+        }
+
+        const videoSize = getElementLayoutSize(video);
+        const containerSize = getElementLayoutSize(video?.parentElement);
+        const videoWidth = videoSize.width;
+        const videoHeight = videoSize.height;
+        const containerWidth = containerSize.width || videoWidth;
+        const containerHeight = containerSize.height || videoHeight;
+
+        if (videoWidth <= 0 || videoHeight <= 0 || containerWidth <= 0 || containerHeight <= 0) {
+            return 1;
+        }
+
+        const scale = Math.min(containerWidth / videoHeight, containerHeight / videoWidth, 1);
+        return Number.isFinite(scale) && scale > 0 ? scale : 1;
+    }
+
+    function buildVideoTransform(originalTransform, state, scale = 1) {
+        const parts = [];
+        const baseTransform = (originalTransform || '').trim();
+        const rotation = normalizeVideoRotation(state?.rotation);
+
+        if (baseTransform && baseTransform !== 'none') {
+            parts.push(baseTransform);
+        }
+        if (rotation !== 0) {
+            parts.push(`rotate(${rotation}deg)`);
+        }
+        if (state?.mirrorX) {
+            parts.push('scaleX(-1)');
+        }
+        if (state?.mirrorY) {
+            parts.push('scaleY(-1)');
+        }
+        if (Number.isFinite(scale) && scale > 0 && scale !== 1) {
+            parts.push(`scale(${formatTransformScale(scale)})`);
+        }
+
+        return parts.join(' ');
+    }
+
     // 通用配置
     const CONFIG = {
         SEEK_STEP_SECONDS: 5,           // 快进/快退的秒数
@@ -56,13 +146,17 @@
     const SITE_SPECIFIC_CONFIG = {
         'youtube.com': {
             mainVideoSelector: '.html5-main-video',
-            fullscreenButtonSelector: '.ytp-fullscreen-button'
+            fullscreenButtonSelector: '.ytp-fullscreen-button',
+            videoTransformMode: 'video',
+            disableQuarterTurnScale: false
         },
         'bilibili.com': {
             // 宽度大于400px通常是主播放器
             mainVideoPredicate: video => video.getBoundingClientRect().width > 400,
             // 新版 '.bpx-player-ctrl-full', 旧版 '.bilibili-player-video-btn-fullscreen'
-            fullscreenButtonSelector: '.bpx-player-ctrl-full, .bilibili-player-video-btn-fullscreen'
+            fullscreenButtonSelector: '.bpx-player-ctrl-full, .bilibili-player-video-btn-fullscreen',
+            videoTransformMode: 'video',
+            disableQuarterTurnScale: false
         }
     };
 
@@ -485,12 +579,20 @@
             this.targetRate = this.settings.targetRate;
             this.currentQuickRate = 1.0;
             this.keyHandlers = {};
+            this.videoTransformShortcutHandlers = {};
+
+            // 视频方向控制：页面级临时状态 + 每个视频的原始 inline 样式快照
+            this.videoTransformState = createDefaultVideoTransformState();
+            this._originalVideoInlineStyles = new WeakMap();
+            this._transformedVideos = new Set();
 
             // 监听器和观察器引用
             this.keydownListener = null;
             this.keyupListener = null;
             this.blurListener = null; // Bug2 修复：blur 监听器
             this.visibilityListener = null; // Bug2 修复：visibilitychange 监听器
+            this.fullscreenChangeListener = null;
+            this.resizeListener = null;
             this.mainObserver = null; // 合并后的主观察器
             this.videoChangeObserver = null;
             this.fallbackVideoObserver = null; // 后备视频监听器
@@ -791,6 +893,10 @@
             GM_registerMenuCommand('设置目标倍速调整步长', () => this.updateSetting('targetRateStep', `请输入按 +/- 键调整目标倍速的步长 (0.1-${this.config.MAX_RATE})`));
             GM_registerMenuCommand('设置音量增强上限', () => this.updateSetting('volumeBoostMax', '请输入音量增强倍率上限 (1.0-4.0)', 4.0, 1.0));
             GM_registerMenuCommand('设置音量增强步长', () => this.updateSetting('volumeBoostStep', '请输入音量增强步长 (0.05-0.5)', 0.5, 0.05));
+            GM_registerMenuCommand('视频顺时针旋转 90°', () => this.rotateVideoClockwise());
+            GM_registerMenuCommand('切换水平镜像', () => this.toggleMirrorX());
+            GM_registerMenuCommand('切换垂直镜像', () => this.toggleMirrorY());
+            GM_registerMenuCommand('重置视频方向', () => this.resetVideoTransform());
 
             // 如果当前网站是临时启用的，则提供"移除"选项
             const currentGroup = this.tempEnabledDomainGroups.find(g => g.mainDomain === this.currentDomain);
@@ -826,6 +932,144 @@
             }
         }
 
+        // 3.5 视频方向控制
+        _isVideoTransformDefault() {
+            return isDefaultVideoTransformState(this.videoTransformState);
+        }
+
+        _rememberOriginalVideoInlineStyles(video) {
+            if (!video || this._originalVideoInlineStyles.has(video)) {
+                return;
+            }
+
+            this._originalVideoInlineStyles.set(video, {
+                transform: video.style.transform || '',
+                transformOrigin: video.style.transformOrigin || ''
+            });
+        }
+
+        _restoreVideoTransform(video) {
+            if (!video || !this._originalVideoInlineStyles.has(video)) {
+                return;
+            }
+
+            const original = this._originalVideoInlineStyles.get(video);
+            video.style.transform = original.transform;
+            video.style.transformOrigin = original.transformOrigin;
+            this._originalVideoInlineStyles.delete(video);
+            this._transformedVideos.delete(video);
+        }
+
+        _restoreAllVideoTransforms() {
+            Array.from(this._transformedVideos).forEach(video => this._restoreVideoTransform(video));
+        }
+
+        _buildVideoTransform(video = this.activeVideo) {
+            if (!video) {
+                return '';
+            }
+
+            const original = this._originalVideoInlineStyles.get(video);
+            const originalTransform = original ? original.transform : (video.style.transform || '');
+            const scale = calculateQuarterTurnScale(video, this.videoTransformState, this.siteConfig);
+            return buildVideoTransform(originalTransform, this.videoTransformState, scale);
+        }
+
+        _applyVideoTransform(video = this.activeVideo) {
+            if (!video) {
+                return false;
+            }
+
+            if (this._isVideoTransformDefault()) {
+                this._restoreVideoTransform(video);
+                return false;
+            }
+
+            this._rememberOriginalVideoInlineStyles(video);
+            video.style.transformOrigin = 'center center';
+            video.style.transform = this._buildVideoTransform(video);
+            this._transformedVideos.add(video);
+            return true;
+        }
+
+        _setActiveVideo(video, shouldSetDefaultRate = false) {
+            if (!video) {
+                return null;
+            }
+
+            if (this.activeVideo && this.activeVideo !== video) {
+                this._restoreVideoTransform(this.activeVideo);
+            }
+
+            this.activeVideo = video;
+
+            if (shouldSetDefaultRate) {
+                this.setDefaultRate(video);
+            }
+
+            this._applyVideoTransform(video);
+            return video;
+        }
+
+        _reapplyVideoTransform() {
+            this._applyVideoTransform(this.activeVideo);
+        }
+
+        _removeVideoTransformLayoutListeners() {
+            if (this.fullscreenChangeListener) {
+                document.removeEventListener('fullscreenchange', this.fullscreenChangeListener);
+                document.removeEventListener('webkitfullscreenchange', this.fullscreenChangeListener);
+                this.fullscreenChangeListener = null;
+            }
+            if (this.resizeListener) {
+                window.removeEventListener('resize', this.resizeListener);
+                this.resizeListener = null;
+            }
+        }
+
+        _showMissingVideoForTransform() {
+            showFloatingMessage('错误：未找到视频元素');
+        }
+
+        rotateVideoClockwise() {
+            if (!this.activeVideo) {
+                this._showMissingVideoForTransform();
+                return;
+            }
+
+            this.videoTransformState.rotation = normalizeVideoRotation(this.videoTransformState.rotation + 90);
+            this._applyVideoTransform();
+            showFloatingMessage(`视频旋转：${this.videoTransformState.rotation}°`);
+        }
+
+        toggleMirrorX() {
+            if (!this.activeVideo) {
+                this._showMissingVideoForTransform();
+                return;
+            }
+
+            this.videoTransformState.mirrorX = !this.videoTransformState.mirrorX;
+            this._applyVideoTransform();
+            showFloatingMessage(`水平镜像：${this.videoTransformState.mirrorX ? '开启' : '关闭'}`);
+        }
+
+        toggleMirrorY() {
+            if (!this.activeVideo) {
+                this._showMissingVideoForTransform();
+                return;
+            }
+
+            this.videoTransformState.mirrorY = !this.videoTransformState.mirrorY;
+            this._applyVideoTransform();
+            showFloatingMessage(`垂直镜像：${this.videoTransformState.mirrorY ? '开启' : '关闭'}`);
+        }
+
+        resetVideoTransform() {
+            this.videoTransformState = createDefaultVideoTransformState();
+            this._restoreAllVideoTransforms();
+            showFloatingMessage('视频方向已重置');
+        }
+
 
         // 4. 初始化流程
         async initialize(isRetry = false) {
@@ -846,7 +1090,8 @@
             this._cleanupForReinit();
 
             try {
-                this.activeVideo = await this._findInitialVideo();
+                const initialVideo = await this._findInitialVideo();
+                this._setActiveVideo(initialVideo, false);
                 Logger.info("初始化成功, 找到视频:", this.activeVideo);
 
                 // 🔧 修复: 成功初始化后才清除后备监听器
@@ -923,9 +1168,11 @@
                 document.removeEventListener('visibilitychange', this.visibilityListener);
                 this.visibilityListener = null;
             }
+            this._removeVideoTransformLayoutListeners();
             this.activeObservers.forEach(observer => observer.disconnect());
             this.activeObservers.clear();
             // 🔧 注意: 不清除后备监听器，让它继续工作直到成功初始化
+            this._restoreAllVideoTransforms();
             this._videoControlButtonsList.forEach(button => button.remove());
             this._videoControlButtonsList.clear();
             this.videoControlButtons = new WeakMap();
@@ -1084,6 +1331,7 @@
                                  this._videoControlButtonsList.delete(button);
                              }
                              // WeakMap 条目会随视频 GC 自动清理，但主动删除更及时
+                             this._restoreVideoTransform(video);
                              this._disconnectAudioNodes(video);
                              if (this.activeVideo === video) {
                                  this.activeVideo = null;
@@ -1169,9 +1417,11 @@
                 document.removeEventListener('visibilitychange', this.visibilityListener);
                 this.visibilityListener = null;
             }
+            this._removeVideoTransformLayoutListeners();
             this.activeObservers.forEach(observer => observer.disconnect());
             this.activeObservers.clear();
             this._cleanupFallbackObserver();
+            this._restoreAllVideoTransforms();
             this._videoControlButtonsList.forEach(button => button.remove());
             this._videoControlButtonsList.clear();
             this.videoControlButtons = new WeakMap();
@@ -1237,6 +1487,12 @@
             this.visibilityListener = this._resetSpeedOnBlur.bind(this);
             window.addEventListener('blur', this.blurListener);
             document.addEventListener('visibilitychange', this.visibilityListener);
+
+            this.fullscreenChangeListener = this._reapplyVideoTransform.bind(this);
+            this.resizeListener = debounce(this._reapplyVideoTransform.bind(this), 100);
+            document.addEventListener('fullscreenchange', this.fullscreenChangeListener);
+            document.addEventListener('webkitfullscreenchange', this.fullscreenChangeListener);
+            window.addEventListener('resize', this.resizeListener);
 
             // 如果视频在 iframe 中，也在 iframe 内设置监听
             if (this.activeVideo) {
@@ -1383,15 +1639,13 @@
 
                 // 如果新视频有效，且（没有activeVideo 或 当前activeVideo无效），则替换
                 if (videoIsValid && (!this.activeVideo || !currentActiveValid)) {
-                    this.activeVideo = video;
-                    this.setDefaultRate(video);
+                    this._setActiveVideo(video, true);
                 } else if (!videoIsValid && (video.src || video.currentSrc)) {
                     // 视频有 src 但还没加载好，监听 loadedmetadata
                     const onLoaded = () => {
                         video.removeEventListener('loadedmetadata', onLoaded);
                         if (!this._isValidVideo(this.activeVideo)) {
-                            this.activeVideo = video;
-                            this.setDefaultRate(video);
+                            this._setActiveVideo(video, true);
                         }
                     };
                     video.addEventListener('loadedmetadata', onLoaded);
@@ -1399,7 +1653,7 @@
             } else if (videos.length > 1) {
                 // 对于配置了特定规则的网站，进行主视频判断
                 if (this.siteConfig.mainVideoSelector || this.siteConfig.mainVideoPredicate) {
-                     if (!this.activeVideo || !videos.includes(this.activeVideo)) {
+                     if (!this.activeVideo || !videos.includes(this.activeVideo) || !currentActiveValid) {
                         let mainVideo;
                         // 优先使用 predicate 函数判断
                         if (this.siteConfig.mainVideoPredicate) {
@@ -1414,8 +1668,7 @@
                              mainVideo = videos.find(v => !v.paused);
                         }
 
-                        this.activeVideo = mainVideo || videos[0];
-                        this.setDefaultRate(this.activeVideo);
+                        this._setActiveVideo(mainVideo || videos[0], true);
                     }
                 } else {
                     // 其他网站，创建控制按钮
@@ -1426,12 +1679,19 @@
                             this.setDefaultRate(video);
                             // 如果没有 activeVideo 或当前 activeVideo 无效，则设置
                             if (!this.activeVideo || !this._isValidVideo(this.activeVideo)) {
-                                this.activeVideo = video;
+                                this._setActiveVideo(video, false);
                             }
                         }
                     });
+                    if (!this.activeVideo || !this._isValidVideo(this.activeVideo)) {
+                        const fallbackVideo = videos.find(video => this._isValidVideo(video));
+                        if (fallbackVideo) {
+                            this._setActiveVideo(fallbackVideo, false);
+                        }
+                    }
                 }
             }
+            this._applyVideoTransform();
         }
         
         setDefaultRate(video) {
@@ -1496,7 +1756,7 @@
 
             // 如果是当前活动视频，设为激活状态
             if (!this.activeVideo) {
-                this.activeVideo = video;
+                this._setActiveVideo(video, false);
                 this.setActiveButton(button);
             } else if (video === this.activeVideo) {
                 this.setActiveButton(button);
@@ -1585,7 +1845,7 @@
             this.setActiveButton(button);
 
             // 切换活动视频
-            this.activeVideo = video;
+            this._setActiveVideo(video, false);
 
             // 应用当前音量增强倍率到新视频
             this._applyBoostToActiveVideo();
@@ -1638,18 +1898,7 @@
 
         // 8. 按键事件处理
         handleKeyDown(e) {
-            // 允许响应长按重复的按键：音量调节(上/下箭头)、右箭头(有自己的长按逻辑)
-            const allowRepeatKeys = ['ArrowUp', 'ArrowDown', 'ArrowRight'];
-            if (e.repeat && !allowRepeatKeys.includes(e.code)) {
-                // 对于脚本管理的按键，长按时仍需拦截，防止穿透到网站原生快捷键（如B站 [ ] 上/下P）
-                if (this.activeVideo && this.keyHandlers[e.code]) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                }
-                return;
-            }
-
-            const path = e.composedPath();
+            const path = typeof e.composedPath === 'function' ? e.composedPath() : [e.target].filter(Boolean);
             // Bug1 修复：增强交互元素检测，避免破坏原生键盘导航
             const isInteractiveElement = (el) => {
                 if (!el || !el.tagName) return false;
@@ -1659,7 +1908,30 @@
                        el.getAttribute?.('role') === 'textbox';
             };
             const isInputFocused = path.some(isInteractiveElement);
-            if (isInputFocused || !this.activeVideo) {
+            if (isInputFocused) {
+                return;
+            }
+
+            const isVideoTransformShortcut = e.shiftKey && this.videoTransformShortcutHandlers[e.code];
+            // 允许响应长按重复的按键：音量调节(上/下箭头)、右箭头(有自己的长按逻辑)
+            const allowRepeatKeys = ['ArrowUp', 'ArrowDown', 'ArrowRight'];
+            if (e.repeat && !allowRepeatKeys.includes(e.code)) {
+                // 对于脚本管理的按键，长按时仍需拦截，防止穿透到网站原生快捷键（如B站 [ ] 上/下P）
+                if (this.activeVideo && (this.keyHandlers[e.code] || isVideoTransformShortcut)) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                }
+                return;
+            }
+
+            if (!this.activeVideo) {
+                return;
+            }
+
+            if (isVideoTransformShortcut) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                this.videoTransformShortcutHandlers[e.code]();
                 return;
             }
 
@@ -1740,6 +2012,13 @@
                 'KeyP': this.resetPlaybackRate.bind(this),
                 'Comma': this.frameStep.bind(this, -1),
                 'Period': this.frameStep.bind(this, 1),
+            };
+
+            this.videoTransformShortcutHandlers = {
+                'KeyQ': this.toggleMirrorX.bind(this),
+                'KeyW': this.toggleMirrorY.bind(this),
+                'KeyE': this.rotateVideoClockwise.bind(this),
+                'KeyR': this.resetVideoTransform.bind(this)
             };
         }
 
@@ -2009,8 +2288,19 @@
         }
     }
 
-    // 启动脚本
-    const controller = new VideoController();
-    controller.start();
+    if (typeof globalThis !== 'undefined' && globalThis.__VIDEO_SPEED_CONTROLLER_TEST_MODE__) {
+        globalThis.__VideoSpeedControllerTestHooks = {
+            VideoController,
+            DEFAULT_VIDEO_TRANSFORM_STATE,
+            createDefaultVideoTransformState,
+            normalizeVideoRotation,
+            calculateQuarterTurnScale,
+            buildVideoTransform
+        };
+    } else {
+        // 启动脚本
+        const controller = new VideoController();
+        controller.start();
+    }
 
 })();

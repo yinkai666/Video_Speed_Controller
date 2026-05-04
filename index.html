@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>视频倍速播放增强版 - Enhanced Video Speed Controller</title>
-<meta name="description" content="一个强大的浏览器油猴脚本，为任意视频网站提供精确的倍速控制、音量增强、快捷键操作。支持 YouTube、Bilibili 等主流平台。">
+<meta name="description" content="一个强大的浏览器油猴脚本，为任意视频网站提供精确的倍速控制、音量增强、视频旋转镜像和快捷键操作。支持 YouTube、Bilibili 等主流平台。">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -404,10 +404,10 @@ kbd {
 <section class="hero">
   <div class="hero-badge">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>
-    v1.6.7
+    v1.6.8
   </div>
   <h1>视频倍速播放<br>增强版</h1>
-  <p class="hero-desc">为任意视频网站赋予精确的速度控制、音量增强和丰富的快捷键操作。<br>支持 YouTube、Bilibili 等主流平台。</p>
+  <p class="hero-desc">为任意视频网站赋予精确的速度控制、音量增强、视频旋转镜像和丰富的快捷键操作。<br>支持 YouTube、Bilibili 等主流平台。</p>
   <div class="hero-actions">
     <a class="btn-primary" href="https://greasyfork.org/zh-CN/scripts/525065" target="_blank" rel="noopener">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -453,6 +453,13 @@ kbd {
       </div>
       <div class="feature-item reveal">
         <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M20.49 15a9 9 0 01-14.85 3.36L1 14"/></svg>
+        </div>
+        <h3>方向控制</h3>
+        <p>通过菜单或 Shift 快捷键旋转当前视频，支持水平镜像、垂直镜像和一键恢复原方向。</p>
+      </div>
+      <div class="feature-item reveal">
+        <div class="feature-icon">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
         </div>
         <h3>智能检测</h3>
@@ -467,7 +474,7 @@ kbd {
   <div class="reveal">
     <p class="section-label">快捷键</p>
     <h2 class="section-title">键盘掌控一切</h2>
-    <p class="section-subtitle">无需鼠标，全键盘操作。所有快捷键均可在设置中自定义步长。</p>
+    <p class="section-subtitle">无需鼠标，全键盘操作。倍速和音量步长可在油猴菜单中调整。</p>
   </div>
   <div class="shortcuts-grid">
     <div class="shortcut-group reveal">
@@ -514,6 +521,28 @@ kbd {
       <div class="shortcut-row">
         <span class="shortcut-desc">降低音量增强</span>
         <span class="shortcut-keys"><kbd>Shift</kbd><span class="key-plus">+</span><kbd>↓</kbd></span>
+      </div>
+    </div>
+    <div class="shortcut-group reveal">
+      <h3>方向控制</h3>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">切换水平镜像</span>
+        <span class="shortcut-keys"><kbd>Shift</kbd><span class="key-plus">+</span><kbd>Q</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">切换垂直镜像</span>
+        <span class="shortcut-keys"><kbd>Shift</kbd><span class="key-plus">+</span><kbd>W</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">顺时针旋转 90°</span>
+        <span class="shortcut-keys"><kbd>Shift</kbd><span class="key-plus">+</span><kbd>E</kbd></span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">重置视频方向</span>
+        <span class="shortcut-keys"><kbd>Shift</kbd><span class="key-plus">+</span><kbd>R</kbd></span>
+      </div>
+      <div class="shortcut-row" style="padding-top: 18px; border-top: 1px solid var(--border); margin-top: 8px;">
+        <span class="shortcut-desc" style="color: var(--text-tertiary); font-size: 13px;">也可通过油猴菜单操作；字幕、弹幕和播放器控件不保证跟随变换</span>
       </div>
     </div>
     <div class="shortcut-group reveal">
@@ -574,7 +603,7 @@ kbd {
       <div class="install-step reveal">
         <div class="step-number">3</div>
         <h3>开始使用</h3>
-        <p>打开任意 YouTube 或 Bilibili 视频页面，快捷键即刻生效。其他网站通过油猴菜单一键启用。</p>
+        <p>打开任意 YouTube 或 Bilibili 视频页面，快捷键即刻生效。其他网站通过油猴菜单一键启用，旋转和镜像也在油猴菜单中提供入口。</p>
       </div>
     </div>
   </section>
@@ -587,7 +616,7 @@ kbd {
     <a href="https://github.com/yinkai666/Video_Speed_Controller" target="_blank" rel="noopener">GitHub</a>
     <a href="https://github.com/yinkai666/Video_Speed_Controller/issues" target="_blank" rel="noopener">反馈问题</a>
   </div>
-  <p>v1.6.7 &middot; MIT License &middot; Made by ternece</p>
+  <p>v1.6.8 &middot; MIT License &middot; Made by ternece</p>
 </footer>
 
 <script>
