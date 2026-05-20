@@ -2,7 +2,7 @@
 // @name         视频倍速播放增强版
 // @name:en      Enhanced Video Speed Controller
 // @namespace    http://tampermonkey.net/
-// @version      1.6.8
+// @version      1.6.9
 // @description  长按右方向键倍速播放，松开恢复原速。支持旋转/镜像当前视频。按+/-键调整倍速，按]/[键快速调整倍速，按P键恢复默认速度。上/下方向键调节音量，Shift+上/下箭头 音量增强（超过100%），回车键切换全屏。左/右方向键快退/快进5秒。支持YouTube、Bilibili等大多数视频网站。脚本会自动检测页面中的iframe视频并启用相应控制。
 // @description:en  Hold right arrow key for speed playback, release to restore. Rotate/mirror the active video. Press +/- to adjust speed, press ]/[ for quick speed adjustment, press P to restore default speed. Up/Down arrows control volume, Shift+Up/Down for volume boost (beyond 100%), Enter toggles fullscreen. Left/Right arrows for 5s rewind/forward. Supports most sites. The script automatically detects iframe videos on the page and enables control.
 // @author       ternece
@@ -577,6 +577,13 @@
             this._rightKeyUpHandled = false; // 防止重复处理
             this.originalRate = 1.0;
             this.targetRate = this.settings.targetRate;
+            this.preferredPlaybackRate = this.settings.defaultRate;
+            this.shouldKeepPlaybackRate = Math.abs(this.settings.defaultRate - DEFAULT_SETTINGS.defaultRate) > 0.001;
+            this._rateKeeper = null;
+            this._rateKeeperTimer = null;
+            this._isApplyingPreferredRate = false;
+            this._youtubeRateRecoveryVideo = null;
+            this._youtubeRateRecoveryUntil = 0;
             this.currentQuickRate = 1.0;
             this.keyHandlers = {};
             this.videoTransformShortcutHandlers = {};
@@ -923,7 +930,7 @@
                     }
 
                     if (key === 'defaultRate' && this.activeVideo) {
-                        this.activeVideo.playbackRate = value;
+                        this._setVideoPlaybackRate(this.activeVideo, value, true);
                     }
                 } else {
                     // 使用浮动消息替代 alert
@@ -1002,6 +1009,7 @@
             }
 
             this.activeVideo = video;
+            this._attachPlaybackRateKeeper(video);
 
             if (shouldSetDefaultRate) {
                 this.setDefaultRate(video);
@@ -1013,6 +1021,163 @@
 
         _reapplyVideoTransform() {
             this._applyVideoTransform(this.activeVideo);
+        }
+
+        _isYouTubeDomain() {
+            return this.currentDomain.includes('youtube.com');
+        }
+
+        _isTemporaryRightArrowSpeedActive() {
+            return this.rightKeyTimer || this.downCount > 0 || this._rightKeyDownTime > 0;
+        }
+
+        _rememberPreferredPlaybackRate(rate) {
+            if (!Number.isFinite(rate)) {
+                return;
+            }
+
+            this.preferredPlaybackRate = rate;
+            this.shouldKeepPlaybackRate = Math.abs(rate - DEFAULT_SETTINGS.defaultRate) > 0.001;
+        }
+
+        _setVideoPlaybackRate(video, rate, shouldKeep = false) {
+            if (!video || !Number.isFinite(rate)) {
+                return;
+            }
+
+            if (shouldKeep) {
+                this._rememberPreferredPlaybackRate(rate);
+            }
+
+            this._isApplyingPreferredRate = true;
+            video.playbackRate = rate;
+            this._isApplyingPreferredRate = false;
+        }
+
+        _armYouTubeRateRecovery(video = this.activeVideo, durationMs = 800) {
+            if (!this._isYouTubeDomain() || !video || video !== this.activeVideo) {
+                return;
+            }
+
+            this._youtubeRateRecoveryVideo = video;
+            this._youtubeRateRecoveryUntil = Date.now() + durationMs;
+        }
+
+        _isYouTubeRateRecoveryArmed(video = this.activeVideo) {
+            return this._isYouTubeDomain() &&
+                !!video &&
+                video === this.activeVideo &&
+                this._youtubeRateRecoveryVideo === video &&
+                Date.now() <= this._youtubeRateRecoveryUntil;
+        }
+
+        _clearYouTubeRateRecovery(video = null) {
+            if (!video || this._youtubeRateRecoveryVideo === video) {
+                this._youtubeRateRecoveryVideo = null;
+                this._youtubeRateRecoveryUntil = 0;
+            }
+        }
+
+        _syncPreferredPlaybackRateFromVideo(video = this.activeVideo) {
+            if (!video || video !== this.activeVideo || !Number.isFinite(video.playbackRate)) {
+                return;
+            }
+
+            this._rememberPreferredPlaybackRate(video.playbackRate);
+            Logger.debug("已同步当前播放速度为用户新选择:", this.preferredPlaybackRate);
+        }
+
+        _shouldRestorePreferredPlaybackRate(video = this.activeVideo) {
+            if (!video || video !== this.activeVideo || !this.shouldKeepPlaybackRate) {
+                return false;
+            }
+            if (!this._isYouTubeRateRecoveryArmed(video)) {
+                return false;
+            }
+            if (this._isApplyingPreferredRate || this._isTemporaryRightArrowSpeedActive()) {
+                return false;
+            }
+            if (Math.abs(this.preferredPlaybackRate - DEFAULT_SETTINGS.defaultRate) <= 0.001) {
+                return false;
+            }
+            return Math.abs(video.playbackRate - DEFAULT_SETTINGS.defaultRate) <= 0.001;
+        }
+
+        _restorePreferredPlaybackRate(video = this.activeVideo) {
+            if (!this._shouldRestorePreferredPlaybackRate(video)) {
+                return;
+            }
+
+            this._setVideoPlaybackRate(video, this.preferredPlaybackRate, false);
+            Logger.debug("已恢复用户设置的播放速度:", this.preferredPlaybackRate);
+        }
+
+        _schedulePreferredPlaybackRateRestore(video = this.activeVideo) {
+            if (!video || !this.shouldKeepPlaybackRate || this._isApplyingPreferredRate) {
+                return;
+            }
+            clearTimeout(this._rateKeeperTimer);
+            this._rateKeeperTimer = setTimeout(() => {
+                this._rateKeeperTimer = null;
+                this._restorePreferredPlaybackRate(video);
+            }, 50);
+        }
+
+        _detachPlaybackRateKeeper() {
+            clearTimeout(this._rateKeeperTimer);
+            this._rateKeeperTimer = null;
+            if (!this._rateKeeper) {
+                return;
+            }
+
+            const { video, handler, events } = this._rateKeeper;
+            events.forEach(eventName => video.removeEventListener(eventName, handler));
+            this._rateKeeper = null;
+            this._clearYouTubeRateRecovery(video);
+        }
+
+        _handlePlaybackRateKeeperEvent(video, eventName) {
+            if (!video || video !== this.activeVideo || this._isApplyingPreferredRate || !this._isYouTubeDomain()) {
+                return;
+            }
+
+            if (eventName === 'ratechange') {
+                if (this._isYouTubeRateRecoveryArmed(video)) {
+                    if (Math.abs(video.playbackRate - DEFAULT_SETTINGS.defaultRate) > 0.001) {
+                        this._syncPreferredPlaybackRateFromVideo(video);
+                        this._clearYouTubeRateRecovery(video);
+                        return;
+                    }
+                    this._schedulePreferredPlaybackRateRestore(video);
+                    return;
+                }
+
+                this._syncPreferredPlaybackRateFromVideo(video);
+                return;
+            }
+
+            if (this._isYouTubeRateRecoveryArmed(video)) {
+                this._schedulePreferredPlaybackRateRestore(video);
+            }
+        }
+
+        _attachPlaybackRateKeeper(video) {
+            if (!video) {
+                return;
+            }
+            if (this._rateKeeper?.video === video) {
+                return;
+            }
+
+            this._detachPlaybackRateKeeper();
+            if (!this._isYouTubeDomain()) {
+                return;
+            }
+
+            const events = ['ratechange', 'pause', 'play', 'playing', 'seeked', 'loadedmetadata'];
+            const handler = (event) => this._handlePlaybackRateKeeperEvent(video, event.type);
+            events.forEach(eventName => video.addEventListener(eventName, handler));
+            this._rateKeeper = { video, handler, events };
         }
 
         _removeVideoTransformLayoutListeners() {
@@ -1177,6 +1342,7 @@
             this._videoControlButtonsList.clear();
             this.videoControlButtons = new WeakMap();
             this._cleanupAllAudioNodes();
+            this._detachPlaybackRateKeeper();
             this.activeVideo = null;
         }
 
@@ -1426,6 +1592,7 @@
             this._videoControlButtonsList.clear();
             this.videoControlButtons = new WeakMap();
             this._cleanupAllAudioNodes();
+            this._detachPlaybackRateKeeper();
             this.activeVideo = null;
         }
 
@@ -1519,7 +1686,7 @@
                 this.downCount = 0;
                 this._rightKeyDownTime = 0;
                 if (this.activeVideo && this.originalRate) {
-                    this.activeVideo.playbackRate = this.originalRate;
+                    this._setVideoPlaybackRate(this.activeVideo, this.originalRate, false);
                     Logger.debug("失焦时恢复播放速度:", this.originalRate);
                 }
             }
@@ -1696,7 +1863,7 @@
         
         setDefaultRate(video) {
             if (Date.now() - this.lastManualRateChangeTime > 5000) {
-                video.playbackRate = this.settings.defaultRate;
+                this._setVideoPlaybackRate(video, this.settings.defaultRate, false);
             }
         }
 
@@ -1986,7 +2153,7 @@
                 } else {
                     // 长按 - 恢复速度
                     if (this.activeVideo && this.originalRate) {
-                        this.activeVideo.playbackRate = this.originalRate;
+                        this._setVideoPlaybackRate(this.activeVideo, this.originalRate, false);
                         showFloatingMessage(`恢复播放速度: ${this.originalRate.toFixed(1)}x`);
                     }
                 }
@@ -2212,6 +2379,7 @@
 
         togglePlayPause() {
             if (!this.activeVideo) return; // Bug3 修复：空引用保护
+            this._armYouTubeRateRecovery(this.activeVideo);
             if (this.activeVideo.paused) {
                 this.activeVideo.play();
                 showFloatingMessage('播放');
@@ -2223,6 +2391,7 @@
 
         seek(delta) {
             if (!this.activeVideo) return; // Bug3 修复：空引用保护
+            this._armYouTubeRateRecovery(this.activeVideo);
             if (this.activeVideo.paused) this.activeVideo.play();
             this.activeVideo.currentTime = Math.max(0, this.activeVideo.currentTime + delta);
             showFloatingMessage(`快${delta > 0 ? '进' : '退'} ${this.config.SEEK_STEP_SECONDS} 秒`);
@@ -2245,7 +2414,7 @@
                 // 延迟后进入长按模式
                 this.rightKeyTimer = setTimeout(() => {
                     if (this._rightKeyDownTime > 0) { // 仍在按住
-                        this.activeVideo.playbackRate = this.targetRate;
+                        this._setVideoPlaybackRate(this.activeVideo, this.targetRate, false);
                         showFloatingMessage(`倍速播放: ${this.targetRate.toFixed(2)}x`);
                     }
                 }, this.LONG_PRESS_DELAY);
@@ -2267,14 +2436,14 @@
             }
 
             const newRate = Math.max(0.1, Math.min(this.config.MAX_RATE, this.activeVideo.playbackRate + delta));
-            this.activeVideo.playbackRate = newRate;
+            this._setVideoPlaybackRate(this.activeVideo, newRate, true);
             this.lastManualRateChangeTime = Date.now();
             showFloatingMessage(`播放速度: ${newRate.toFixed(2)}x`);
         }
         
         resetPlaybackRate() {
             if (!this.activeVideo) return; // Bug3 修复：空引用保护
-            this.activeVideo.playbackRate = this.settings.defaultRate;
+            this._setVideoPlaybackRate(this.activeVideo, this.settings.defaultRate, true);
             this.lastManualRateChangeTime = Date.now();
             showFloatingMessage(`播放速度重置为: ${this.settings.defaultRate.toFixed(2)}x`);
         }
