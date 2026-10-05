@@ -35,7 +35,6 @@
         SEEK_STEP_SECONDS: 5,           // 快进/快退的秒数
         VOLUME_STEP: 0.1,               // 音量调整步长
         DEFAULT_FPS: 30,                // 默认视频帧率 (用于逐帧操作)
-        SHORT_PRESS_MAX_COUNT: 3,       // 短按判断的按键计数阈值
 
         // 超时与延迟
         INIT_RETRY_DELAY: 5000,         // 初始化重试延迟
@@ -103,7 +102,7 @@
     // 通用防抖函数
     function debounce(func, wait) {
         let timeout;
-        return function executedFunction(...args) {
+        const debounced = function (...args) {
             const later = () => {
                 clearTimeout(timeout);
                 func.apply(this, args);
@@ -111,6 +110,8 @@
             clearTimeout(timeout);
             timeout = setTimeout(later, wait);
         };
+        debounced.cancel = () => clearTimeout(timeout);
+        return debounced;
     }
 
     class VideoController {
@@ -145,8 +146,13 @@
             this.lastManualRateChangeTime = 0;
             this.activeVideo = null;
             this.videoControlButtons = new Map();
+            this.videoStates = new Map();
+            this.playSequence = 0;
+            this.manualVideo = null;
             this.rightKeyTimer = null;
-            this.downCount = 0;
+            this.rightKeyPressed = false;
+            this.rightPressVideo = null;
+            this.isLongPress = false;
             this.originalRate = 1.0;
             this.targetRate = this.settings.targetRate;
             this.currentQuickRate = 1.0;
@@ -156,7 +162,8 @@
             this.keydownListener = null;
             this.keyupListener = null;
             this.mainObserver = null; // 合并后的主观察器
-            this.videoChangeObserver = null;
+            this.videoMutationListener = null;
+            this.videoRootObservers = new Map();
             this.activeObservers = new Set();
 
             // 创建防抖版的视频检测函数
@@ -277,7 +284,8 @@
             this.cleanup();
         
             try {
-                this.activeVideo = await this._findInitialVideo();
+                // 发现流程已经选择目标；异步返回期间可能收到新的 play 事件。
+                await this._findInitialVideo();
                 console.log("初始化成功, 找到视频:", this.activeVideo);
         
                 this._setupPersistentObservers();
@@ -312,7 +320,7 @@
                 if (deepVideos.length > 0) {
                     this.setupVideos(deepVideos);
                     showFloatingMessage(`通过深度查找发现了 ${deepVideos.length} 个视频`);
-                    return deepVideos[0];
+                    return this.activeVideo || deepVideos[0];
                 }
             }
             
@@ -322,7 +330,7 @@
         
         _setupPersistentObservers() {
             // 1. 合并 videoObserver 和 urlObserver, 并优化回调
-            this.mainObserver = new MutationObserver((mutations) => {
+            this.videoMutationListener = (mutations) => {
                 // 优先检查 URL 变化，因为它更轻量
                 if (location.href !== this.currentUrl) {
                     this.handleUrlChange();
@@ -330,33 +338,13 @@
                     return;
                 }
 
+                // 视频管理独立于选择按钮，整个播放器容器移除时也能清理。
+                if (Array.from(this.videoStates.keys()).some(video => !video.isConnected)) {
+                    this.setupVideos(Array.from(this.videoStates.keys()).filter(video => video.isConnected));
+                }
+
                 // 检查 DOM 变动
                 mutations.forEach(mutation => {
-                    // 垃圾回收：检查是否有被管理的视频被移除了
-                    mutation.removedNodes.forEach(removedNode => {
-                        // 检查被移除的节点本身或者其子节点是否是我们正在管理的视频
-                        const videosToRemove = [];
-                        if (this.videoControlButtons.has(removedNode)) {
-                            videosToRemove.push(removedNode);
-                        } else if (removedNode.querySelectorAll) {
-                            removedNode.querySelectorAll('video').forEach(video => {
-                                if (this.videoControlButtons.has(video)) {
-                                    videosToRemove.push(video);
-                                }
-                            });
-                        }
-
-                        videosToRemove.forEach(video => {
-                             console.log("垃圾回收：清理被移除的视频", video);
-                             const button = this.videoControlButtons.get(video);
-                             if (button) button.remove();
-                             this.videoControlButtons.delete(video);
-                             if (this.activeVideo === video) {
-                                 this.activeVideo = null;
-                             }
-                        });
-                    });
-
                     // 检查是否有新视频被添加
                     const hasNewVideos = Array.from(mutation.addedNodes).some(n => n.tagName === 'VIDEO' || (n.querySelector && n.querySelector('video')));
                     if (hasNewVideos) {
@@ -364,26 +352,43 @@
                          this.debouncedDetectAndSetupVideos();
                     }
                 });
-            });
+            };
+            this.mainObserver = new MutationObserver(this.videoMutationListener);
             this.mainObserver.observe(document.body, { childList: true, subtree: true });
             this.activeObservers.add(this.mainObserver);
+            this.syncVideoRootObservers();
+        }
 
-            // 2. 观察当前视频的父节点，以便在视频被替换时重新初始化 (保留)
-            if (this.activeVideo && this.activeVideo.parentElement) {
-                this.videoChangeObserver = new MutationObserver((mutations) => {
-                    const videoWasRemoved = mutations.some(m => Array.from(m.removedNodes).some(n => n === this.activeVideo));
-                    if (videoWasRemoved) {
-                        console.log("侦测到当前活动视频节点被移除，将重新初始化...");
-                        this.initialize().catch(console.error);
-                    }
-                });
-                this.videoChangeObserver.observe(this.activeVideo.parentElement, { childList: true });
-                this.activeObservers.add(this.videoChangeObserver);
-            }
+        syncVideoRootObservers() {
+            if (!this.videoMutationListener) return;
+            const roots = new Set();
+            this.videoStates.forEach((state, video) => {
+                // document.body 的观察器不能穿过 Shadow DOM 或 iframe 文档。
+                for (const root of [video.getRootNode(), video.ownerDocument]) {
+                    if (root && root !== document) roots.add(root);
+                }
+            });
+            this.videoRootObservers.forEach((observer, root) => {
+                if (!roots.has(root)) {
+                    observer.disconnect();
+                    this.activeObservers.delete(observer);
+                    this.videoRootObservers.delete(root);
+                }
+            });
+            roots.forEach(root => {
+                if (this.videoRootObservers.has(root)) return;
+                const observer = new MutationObserver(this.videoMutationListener);
+                observer.observe(root, { childList: true, subtree: true });
+                this.videoRootObservers.set(root, observer);
+                this.activeObservers.add(observer);
+            });
         }
 
         // 5. 清理与监听
         cleanup() {
+            this.debouncedDetectAndSetupVideos.cancel();
+            this.finishRightArrowPress();
+            this.rightKeyPressed = false;
             if (this.keydownListener) {
                 window.removeEventListener("keydown", this.keydownListener, true);
                 this.keydownListener = null;
@@ -394,8 +399,12 @@
             }
             this.activeObservers.forEach(observer => observer.disconnect());
             this.activeObservers.clear();
-            this.videoControlButtons.forEach(button => button.remove());
-            this.videoControlButtons.clear();
+            this.videoRootObservers.clear();
+            this.mainObserver = null;
+            this.videoMutationListener = null;
+            this.videoStates.forEach((state, video) => this.untrackVideo(video));
+            this.manualVideo = null;
+            this.playSequence = 0;
             this.activeVideo = null;
         }
 
@@ -481,9 +490,8 @@
         
         detectAndSetupVideos() {
             const videos = this.findAllVideos();
-            if (videos.length === 0) return null;
             this.setupVideos(videos);
-            return this.activeVideo || videos[0];
+            return this.activeVideo;
         }
 
         findAllVideos() {
@@ -506,44 +514,108 @@
         }
 
         setupVideos(videos) {
-            if (videos.length === 1) {
-                const video = videos[0];
-                if (video.readyState >= 1 && !this.activeVideo) {
-                    this.activeVideo = video;
-                    this.setDefaultRate(video);
-                }
-            } else if (videos.length > 1) {
-                // 对于配置了特定规则的网站，进行主视频判断
-                if (this.siteConfig.mainVideoSelector || this.siteConfig.mainVideoPredicate) {
-                     if (!this.activeVideo || !videos.includes(this.activeVideo)) {
-                        let mainVideo;
-                        // 优先使用 predicate 函数判断
-                        if (this.siteConfig.mainVideoPredicate) {
-                             mainVideo = videos.find(this.siteConfig.mainVideoPredicate);
-                        }
-                        // 如果没有找到，再使用选择器判断
-                        if (!mainVideo && this.siteConfig.mainVideoSelector) {
-                            mainVideo = videos.find(v => v.matches(this.siteConfig.mainVideoSelector));
-                        }
-                         // 如果还是没有，则找一个未暂停的作为补充
-                        if (!mainVideo) {
-                             mainVideo = videos.find(v => !v.paused);
-                        }
-
-                        this.activeVideo = mainVideo || videos[0];
-                        this.setDefaultRate(this.activeVideo);
-                    }
-                } else {
-                    // 其他网站，创建控制按钮
-                    videos.forEach((video, index) => {
-                        if (!this.videoControlButtons.has(video) && video.readyState >= 1) {
-                            this.createVideoControlButton(video, index + 1);
-                            this.setDefaultRate(video);
-                            if (!this.activeVideo) this.activeVideo = video;
-                        }
-                    });
-                }
+            const available = new Set(videos.filter(video => video.isConnected));
+            const hadVideos = this.videoStates.size > 0;
+            const newlyPlaying = Array.from(available).filter(video =>
+                !this.videoStates.has(video) && !video.paused && !video.ended);
+            this.videoStates.forEach((state, video) => {
+                if (!available.has(video)) this.untrackVideo(video);
+            });
+            available.forEach(video => this.trackVideo(video));
+            // 自动播放可能先于防抖扫描。同批发现的视频没有可靠先后顺序。
+            if (hadVideos && newlyPlaying.length) {
+                const sequence = ++this.playSequence;
+                newlyPlaying.forEach(video => { this.videoStates.get(video).lastPlay = sequence; });
+                this.manualVideo = null;
             }
+
+            const showButtons = available.size > 1 &&
+                !this.siteConfig.mainVideoSelector && !this.siteConfig.mainVideoPredicate;
+            Array.from(available).forEach((video, index) => {
+                const state = this.videoStates.get(video);
+                if (video.readyState >= 1 && !state.rateInitialized) {
+                    this.setDefaultRate(video);
+                    state.rateInitialized = true;
+                }
+                if (showButtons && video.readyState >= 1 && !this.videoControlButtons.has(video)) {
+                    this.createVideoControlButton(video, index + 1);
+                } else if (!showButtons && this.videoControlButtons.has(video)) {
+                    this.videoControlButtons.get(video).remove();
+                    this.videoControlButtons.delete(video);
+                }
+            });
+            this.selectActiveVideo();
+            this.syncVideoRootObservers();
+        }
+
+        trackVideo(video) {
+            if (this.videoStates.has(video)) return;
+            const state = { lastPlay: 0, rateInitialized: false };
+            state.onPlay = () => {
+                // 忽略已经暂停、结束或被移除的视频的延迟事件。
+                if (!video.isConnected || video.paused || video.ended) return;
+                state.lastPlay = ++this.playSequence;
+                this.manualVideo = null;
+                this.setActiveVideo(video);
+            };
+            state.onStop = () => {
+                if (this.activeVideo === video) {
+                    this.manualVideo = null;
+                    this.selectActiveVideo();
+                }
+            };
+            state.onMetadata = () => this.setupVideos(Array.from(this.videoStates.keys()));
+            this.videoStates.set(video, state);
+            video.addEventListener('play', state.onPlay);
+            video.addEventListener('pause', state.onStop);
+            video.addEventListener('ended', state.onStop);
+            video.addEventListener('loadedmetadata', state.onMetadata);
+        }
+
+        untrackVideo(video) {
+            const state = this.videoStates.get(video);
+            if (!state) return;
+            video.removeEventListener('play', state.onPlay);
+            video.removeEventListener('pause', state.onStop);
+            video.removeEventListener('ended', state.onStop);
+            video.removeEventListener('loadedmetadata', state.onMetadata);
+            this.videoStates.delete(video);
+            const button = this.videoControlButtons.get(video);
+            if (button) button.remove();
+            this.videoControlButtons.delete(video);
+            if (this.manualVideo === video) this.manualVideo = null;
+        }
+
+        selectActiveVideo() {
+            const videos = Array.from(this.videoStates.keys()).filter(video => video.isConnected);
+            if (videos.includes(this.manualVideo)) {
+                this.setActiveVideo(this.manualVideo);
+                return;
+            }
+            const playing = videos.filter(video => !video.paused && !video.ended);
+            let next = null;
+            const latestPlay = playing.reduce((latest, video) =>
+                Math.max(latest, this.videoStates.get(video).lastPlay), 0);
+            const candidates = playing.length ?
+                playing.filter(video => this.videoStates.get(video).lastPlay === latestPlay) : videos;
+            if (!next && candidates.includes(this.activeVideo)) next = this.activeVideo;
+            if (!next && this.siteConfig.mainVideoPredicate) {
+                next = candidates.find(this.siteConfig.mainVideoPredicate);
+            }
+            if (!next && this.siteConfig.mainVideoSelector) {
+                next = candidates.find(video => video.matches(this.siteConfig.mainVideoSelector));
+            }
+            this.setActiveVideo(next || candidates[0] || null);
+        }
+
+        setActiveVideo(video) {
+            if (this.activeVideo !== video) {
+                this.finishRightArrowPress();
+                this.activeVideo = video;
+            }
+            this.videoControlButtons.forEach((button, target) => {
+                button.style.backgroundColor = target === video ? 'rgba(0, 128, 255, 0.8)' : 'rgba(0, 0, 0, 0.6)';
+            });
         }
         
         setDefaultRate(video) {
@@ -567,15 +639,10 @@
             textSpan.textContent = `视频 ${index}`;
             button.appendChild(textSpan);
 
-            if (!this.activeVideo) {
-                this.activeVideo = video;
-                button.style.backgroundColor = 'rgba(0, 128, 255, 0.8)';
-            }
-
             button.addEventListener('click', () => {
-                this.videoControlButtons.forEach(btn => btn.style.backgroundColor = 'rgba(0, 0, 0, 0.6)');
-                this.activeVideo = video;
-                button.style.backgroundColor = 'rgba(0, 128, 255, 0.8)';
+                if (!video.isConnected) return;
+                this.manualVideo = video;
+                this.setActiveVideo(video);
                 showFloatingMessage(`已切换到视频 ${index} 控制`);
             });
 
@@ -595,7 +662,9 @@
             
             const path = e.composedPath();
             const isInputFocused = path.some(el => el.isContentEditable || ['INPUT', 'TEXTAREA'].includes(el.tagName));
-            if (isInputFocused || !this.activeVideo) {
+            if (isInputFocused) return;
+            if (this.activeVideo && !this.activeVideo.isConnected) this.selectActiveVideo();
+            if (!this.activeVideo) {
                 return;
             }
         
@@ -614,19 +683,9 @@
                  e.stopImmediatePropagation();
             }
 
-            if (e.code === 'ArrowRight') {
-                clearTimeout(this.rightKeyTimer);
-                this.rightKeyTimer = null;
-                
-                if (this.downCount < this.config.SHORT_PRESS_MAX_COUNT) { //判定为短按
-                    this.seek(this.config.SEEK_STEP_SECONDS);
-                } else { //判定为长按
-                     if(this.activeVideo) {
-                        this.activeVideo.playbackRate = this.originalRate;
-                        showFloatingMessage(`恢复播放速度: ${this.originalRate.toFixed(1)}x`);
-                     }
-                }
-                this.downCount = 0;
+            if (e.code === 'ArrowRight' && this.rightKeyPressed) {
+                this.finishRightArrowPress(true);
+                this.rightKeyPressed = false;
             }
         }
         
@@ -708,17 +767,32 @@
         
         // 此方法逻辑复杂，保留原名，仅在 handler 中调用
         handleRightArrowPress() {
-            if (this.activeVideo.paused) this.activeVideo.play();
+            if (this.rightKeyPressed) return;
+            const video = this.activeVideo;
+            this.rightKeyPressed = true;
+            this.rightPressVideo = video;
+            this.originalRate = video.playbackRate;
+            if (video.paused) video.play();
+            this.rightKeyTimer = setTimeout(() => {
+                if (this.rightPressVideo !== video || !video.isConnected) return;
+                video.playbackRate = this.targetRate;
+                this.isLongPress = true;
+                showFloatingMessage(`倍速播放: ${this.targetRate.toFixed(2)}x`);
+            }, this.LONG_PRESS_DELAY);
+        }
 
-            if (this.downCount === 0) {
-                this.originalRate = this.activeVideo.playbackRate;
-                this.rightKeyTimer = setTimeout(() => {
-                    this.activeVideo.playbackRate = this.targetRate;
-                    showFloatingMessage(`倍速播放: ${this.targetRate.toFixed(2)}x`);
-                    this.downCount = this.config.SHORT_PRESS_MAX_COUNT; // 设置为长按状态
-                }, this.LONG_PRESS_DELAY);
+        finishRightArrowPress(allowSeek = false) {
+            clearTimeout(this.rightKeyTimer);
+            this.rightKeyTimer = null;
+            const video = this.rightPressVideo;
+            this.rightPressVideo = null;
+            if (video && this.isLongPress) {
+                video.playbackRate = this.originalRate;
+                if (allowSeek) showFloatingMessage(`恢复播放速度: ${this.originalRate.toFixed(1)}x`);
+            } else if (allowSeek && video && video === this.activeVideo && video.isConnected) {
+                this.seek(this.config.SEEK_STEP_SECONDS);
             }
-            this.downCount++;
+            this.isLongPress = false;
         }
 
         adjustTargetRate(delta) {
